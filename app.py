@@ -71,6 +71,126 @@ def detect_exercise_type(text: str) -> str:
 
 
 # ─────────────────────────────────────────────
+# PDF : extraction PyMuPDF — raster + vectoriel
+# ─────────────────────────────────────────────
+import fitz  # PyMuPDF, déjà installé (dépendance pdf2docx)
+
+
+def _cluster_rects(rects, margin=14.0):
+    """Regroupe les rectangles qui se touchent ou sont proches (< margin pt)."""
+    rects = [fitz.Rect(r) for r in rects]
+    merged = True
+    while merged:
+        merged = False
+        out = []
+        while rects:
+            r = rects.pop()
+            grown = fitz.Rect(r.x0 - margin, r.y0 - margin,
+                              r.x1 + margin, r.y1 + margin)
+            absorbed = []
+            for i, other in enumerate(rects):
+                if grown.intersects(other):
+                    r |= other
+                    absorbed.append(i)
+                    merged = True
+            for i in reversed(absorbed):
+                rects.pop(i)
+            out.append(r)
+        rects = out
+    return rects
+
+
+def parse_pdf(content: bytes, filename: str):
+    """
+    Extrait d'un PDF, dans l'ordre de lecture :
+    - les images raster (photos, dessins importés)
+    - les figures vectorielles (tracés regroupés puis rasterisés en PNG 2x)
+    - le texte complet
+    Les zones de figures sont détectées via get_drawings() + clustering.
+    """
+    doc = fitz.open(stream=content, filetype="pdf")
+    images = []
+    full_text = []
+    idx = 0
+
+    for pno, page in enumerate(doc):
+        pw, ph = page.rect.width, page.rect.height
+        page_area = pw * ph
+        regions = []
+
+        # 1. Rectangles des images raster
+        for img in page.get_images(full=True):
+            try:
+                for rect in page.get_image_rects(img[0]):
+                    if rect.width > 12 and rect.height > 12:
+                        regions.append(rect)
+            except Exception:
+                pass
+
+        # 2. Rectangles des tracés vectoriels (figures dessinées)
+        try:
+            for d in page.get_drawings():
+                r = d.get("rect")
+                if r is None:
+                    continue
+                # Ignorer traits fins pleine largeur (lignes de séparation,
+                # lignes de réponse) et micro-tracés
+                if r.width < 10 or r.height < 10:
+                    continue
+                if r.width > 0.92 * pw and r.height < 20:
+                    continue
+                regions.append(r)
+        except Exception:
+            pass
+
+        # 3. Clustering : tracés voisins = une figure
+        clusters = _cluster_rects(regions)
+
+        # 4. Filtres : trop petit, ou boîte de fond couvrant la page
+        keep = []
+        for r in clusters:
+            r = r & page.rect  # borner à la page
+            if r.width < 24 or r.height < 24:
+                continue
+            if (r.width * r.height) > 0.85 * page_area:
+                continue
+            keep.append(r)
+
+        # 5. Ordre de lecture : haut → bas, gauche → droite
+        keep.sort(key=lambda r: (round(r.y0 / 24), r.x0))
+
+        # 6. Rasterisation 2x de chaque zone
+        for r in keep:
+            try:
+                pix = page.get_pixmap(clip=r, matrix=fitz.Matrix(2, 2))
+                if pix.width < 8 or pix.height < 8:
+                    continue
+                b64 = base64.b64encode(pix.tobytes("png")).decode()
+                images.append({
+                    "index": idx,
+                    "page": pno + 1,
+                    "data": f"data:image/png;base64,{b64}",
+                    "w": pix.width, "h": pix.height,
+                })
+                idx += 1
+            except Exception:
+                pass
+
+        full_text.append(page.get_text("text"))
+
+    doc.close()
+    return {
+        "filename": filename,
+        "pdf_mode": True,
+        "num_exercises": 0,
+        "num_images": len(images),
+        "images": images,
+        "text": "\n".join(full_text),
+        "exercises": [],
+    }
+
+
+# ─────────────────────────────────────────────
 # ENDPOINT : /parse
 # DOCX → structure JSON pédagogique
 # ─────────────────────────────────────────────
@@ -85,22 +205,9 @@ async def parse_document(file: UploadFile = File(...)):
     filename = file.filename or "document"
     ext = filename.rsplit(".", 1)[-1].lower()
 
-    # Conversion PDF → DOCX si nécessaire
+    # PDF : extraction directe PyMuPDF (images raster + figures vectorielles)
     if ext == "pdf":
-        pdf_path = f"/tmp/{uuid.uuid4()}.pdf"
-        docx_path = pdf_path.replace(".pdf", ".docx")
-        try:
-            with open(pdf_path, "wb") as f:
-                f.write(content)
-            cv = Converter(pdf_path)
-            cv.convert(docx_path)
-            cv.close()
-            with open(docx_path, "rb") as f:
-                content = f.read()
-        finally:
-            for p in [pdf_path, docx_path]:
-                if os.path.exists(p):
-                    os.remove(p)
+        return parse_pdf(content, filename)
 
     # Parser le DOCX
     try:
