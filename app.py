@@ -21,6 +21,9 @@ import os
 import time
 import uuid
 import zipfile
+import glob
+import tempfile
+import subprocess
 from typing import Optional
 
 # python-docx
@@ -191,6 +194,91 @@ def parse_pdf(content: bytes, filename: str):
 
 
 # ─────────────────────────────────────────────
+# DOCX : rasterisation générique des images non-web
+# (EMF / WMF / TIFF / vectoriels) → PNG via LibreOffice
+# ─────────────────────────────────────────────
+_WEB_SAFE = ("png", "jpeg", "jpg", "gif", "webp", "bmp")
+# Fragments de content-type non affichables par un navigateur → extension LibreOffice
+_NONWEB_EXT = {
+    "x-emf": "emf", "emf": "emf",
+    "x-wmf": "wmf", "wmf": "wmf",
+    "tiff": "tiff", "tif": "tiff",
+}
+
+
+def _is_web_safe(ct: str) -> bool:
+    ct = (ct or "").lower()
+    return any(w in ct for w in _WEB_SAFE)
+
+
+def _nonweb_ext(ct: str):
+    ct = (ct or "").lower()
+    for frag, ext in _NONWEB_EXT.items():
+        if frag in ct:
+            return ext
+    return None
+
+
+def _autocrop_png(png_bytes: bytes, pad: int = 6) -> bytes:
+    """Rogne les marges blanches d'un PNG (LibreOffice exporte une page entière)."""
+    try:
+        from PIL import Image, ImageChops
+        im = Image.open(io.BytesIO(png_bytes)).convert("RGB")
+        bg = Image.new("RGB", im.size, (255, 255, 255))
+        bbox = ImageChops.difference(im, bg).getbbox()
+        if bbox:
+            l, t, r, b = bbox
+            l = max(0, l - pad); t = max(0, t - pad)
+            r = min(im.width, r + pad); b = min(im.height, b + pad)
+            if r > l and b > t:
+                im = im.crop((l, t, r, b))
+        out = io.BytesIO()
+        im.save(out, "PNG")
+        return out.getvalue()
+    except Exception:
+        return png_bytes
+
+
+def rasterize_blobs(jobs):
+    """
+    jobs : liste de (key, blob_bytes, ext).
+    Convertit TOUTES les images non-web en PNG en UNE seule invocation LibreOffice
+    (rapide), puis autocrop. Retourne {key: png_bytes}. Robuste : en cas d'échec,
+    la clé est simplement absente du résultat (→ placeholder côté frontend).
+    """
+    result = {}
+    if not jobs:
+        return result
+    with tempfile.TemporaryDirectory() as td:
+        names = {}
+        srcpaths = []
+        for i, (key, blob, ext) in enumerate(jobs):
+            fn = f"img{i}.{ext}"
+            path = os.path.join(td, fn)
+            with open(path, "wb") as f:
+                f.write(blob)
+            names[f"img{i}"] = key
+            srcpaths.append(path)
+        try:
+            subprocess.run(
+                ["soffice", "--headless", "--convert-to", "png", "--outdir", td] + srcpaths,
+                timeout=180, capture_output=True,
+                env={**os.environ, "HOME": td},  # profil LibreOffice inscriptible
+            )
+        except Exception:
+            return result
+        for png in glob.glob(os.path.join(td, "*.png")):
+            base = os.path.splitext(os.path.basename(png))[0]
+            if base in names:
+                try:
+                    with open(png, "rb") as f:
+                        result[names[base]] = _autocrop_png(f.read())
+                except Exception:
+                    pass
+    return result
+
+
+# ─────────────────────────────────────────────
 # ENDPOINT : /parse
 # DOCX → structure JSON pédagogique
 # ─────────────────────────────────────────────
@@ -215,21 +303,40 @@ async def parse_document(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(400, f"Impossible de lire le document : {e}")
 
-    # Extraire toutes les images du document
+    # Extraire toutes les images du document.
+    # Les images web (png/jpeg/…) sont encodées telles quelles ; les formats
+    # non affichables par un navigateur (EMF/WMF/TIFF vectoriels des DOCX Word)
+    # sont rasterisés en PNG via LibreOffice — solution GÉNÉRIQUE, tous formats.
     images = {}
+    raster_jobs = []
     for rId, rel in doc.part.rels.items():
         if "image" in rel.target_ref:
             try:
                 img_blob = rel.target_part.blob
-                img_b64 = base64.b64encode(img_blob).decode()
                 content_type = rel.target_part.content_type or "image/png"
-                images[rId] = {
-                    "data": f"data:{content_type};base64,{img_b64}",
-                    "content_type": content_type,
-                    "size": len(img_blob)
-                }
+                if _is_web_safe(content_type):
+                    img_b64 = base64.b64encode(img_blob).decode()
+                    images[rId] = {
+                        "data": f"data:{content_type};base64,{img_b64}",
+                        "content_type": content_type,
+                        "size": len(img_blob)
+                    }
+                else:
+                    # EMF/WMF/TIFF/… → à rasteriser (une seule passe LibreOffice)
+                    raster_jobs.append((rId, img_blob, _nonweb_ext(content_type) or "emf"))
             except Exception:
                 pass
+
+    # Rasterisation groupée des images non-web → PNG affichables
+    for rId, png in rasterize_blobs(raster_jobs).items():
+        img_b64 = base64.b64encode(png).decode()
+        images[rId] = {
+            "data": f"data:image/png;base64,{img_b64}",
+            "content_type": "image/png",
+            "size": len(png)
+        }
+    # Les images non converties (ex : WDP illisible) sont simplement absentes :
+    # le frontend affichera alors un placeholder étiqueté « coller ici ».
 
     # Construire les blocs
     blocks = []
@@ -254,7 +361,7 @@ async def parse_document(file: UploadFile = File(...)):
     def process_paragraph(para):
         text = para.text.strip()
         imgs = extract_paragraph_images(para._element)
-        
+
         if not text and not imgs:
             return None
 
@@ -460,190 +567,3 @@ async def export_docx(request: Request):
     def add_image_to_para(para, img_data: str):
         """Ajoute une image base64 à un paragraphe."""
         if not img_data or not img_data.startswith("data:"):
-            return
-        try:
-            _, b64 = img_data.split(",", 1)
-            img_bytes = base64.b64decode(b64)
-            img_stream = io.BytesIO(img_bytes)
-            run = para.add_run()
-            run.add_picture(img_stream, width=Inches(1.5))
-        except Exception:
-            pass
-
-    def add_exercise_header(title: str, num: int):
-        para = doc.add_paragraph()
-        run = para.add_run(f"Exercice {num} — {title.upper()}")
-        run.bold = True
-        run.font.size = Pt(10)
-        run.font.color.rgb = RGBColor(0x6e, 0xb7, 0x9e)
-
-    def add_consigne(text: str):
-        para = doc.add_paragraph()
-        run = para.add_run(text)
-        run.bold = True
-        run.font.size = Pt(13)
-
-    def add_response_line(label: str = ""):
-        para = doc.add_paragraph()
-        if label:
-            para.add_run(f"{label} ").bold = True
-        para.add_run("_" * 20)
-
-    def build_relier_table(images, words):
-        """Template fixe pour exercice relier : image | • | mot"""
-        if not words:
-            return
-        table = doc.add_table(rows=len(words), cols=3)
-        table.style = "Table Grid"
-        for i, word in enumerate(words):
-            row = table.rows[i]
-            # Colonne image
-            cell_img = row.cells[0]
-            if i < len(images):
-                para = cell_img.paragraphs[0]
-                para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                add_image_to_para(para, images[i]["data"])
-            # Colonne point
-            row.cells[1].text = "•"
-            row.cells[1].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-            # Colonne mot
-            row.cells[2].text = word
-            row.cells[2].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.LEFT
-
-    ex_num = 0
-    for exercise in exercises:
-        ex_type = exercise.get("exercise_type", "autre")
-        consigne = exercise.get("adapted_consigne") or exercise.get("consigne", "")
-        blocks = exercise.get("adapted_blocks") or exercise.get("blocks", [])
-        images = exercise.get("all_images", [])
-
-        if ex_type == "header":
-            for block in blocks:
-                if block.get("text"):
-                    doc.add_paragraph(block["text"])
-            continue
-
-        ex_num += 1
-
-        # En-tête exercice
-        add_exercise_header(ex_type, ex_num)
-
-        # Consigne
-        if consigne:
-            add_consigne(consigne)
-
-        # Corps selon le type d'exercice
-        if ex_type == "relier":
-            # Extraire les mots de la colonne droite depuis les blocs
-            words = [
-                b["text"] for b in blocks
-                if b.get("text") and not b.get("is_consigne")
-                and len(b["text"].split()) <= 4
-            ]
-            build_relier_table(images, words)
-
-        elif ex_type in ("compléter", "numéroter"):
-            for block in blocks:
-                if block.get("is_consigne"):
-                    continue
-                if block["type"] == "table":
-                    # Reconstruire le tableau
-                    rows = block.get("rows", [])
-                    if rows:
-                        t = doc.add_table(rows=len(rows), cols=len(rows[0]))
-                        t.style = "Table Grid"
-                        for i, row in enumerate(rows):
-                            for j, cell in enumerate(row):
-                                t.rows[i].cells[j].text = cell.get("text", "")
-                else:
-                    text = block.get("text", "")
-                    if text:
-                        doc.add_paragraph(text)
-                    if block.get("images"):
-                        para = doc.add_paragraph()
-                        for img in block["images"][:2]:
-                            add_image_to_para(para, img["data"])
-
-        elif ex_type == "classer":
-            # Tableau découpe compact
-            all_items = [
-                b["text"] for b in blocks
-                if b.get("text") and not b.get("is_consigne")
-            ]
-            if all_items:
-                t = doc.add_table(rows=len(all_items), cols=2)
-                t.style = "Table Grid"
-                for i, item in enumerate(all_items):
-                    t.rows[i].cells[0].text = str(i + 1)
-                    t.rows[i].cells[1].text = ""  # case réponse
-
-        else:
-            # Fallback : texte + images
-            for block in blocks:
-                if block.get("is_consigne"):
-                    continue
-                if block.get("text"):
-                    doc.add_paragraph(block["text"])
-                for img in block.get("images", [])[:2]:
-                    para = doc.add_paragraph()
-                    add_image_to_para(para, img["data"])
-
-        # Séparateur
-        doc.add_paragraph("─" * 30)
-
-    # Sauvegarder et retourner
-    buf = io.BytesIO()
-    doc.save(buf)
-    buf.seek(0)
-
-    return StreamingResponse(
-        buf,
-        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
-    )
-
-
-# ─────────────────────────────────────────────
-# ENDPOINT : /convert (existant — conservé)
-# PDF → DOCX
-# ─────────────────────────────────────────────
-@app.post("/convert")
-async def convert_pdf(file: UploadFile = File(...)):
-    if not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(400, "Format PDF requis")
-
-    uid = str(uuid.uuid4())[:8]
-    pdf_path = f"/tmp/{uid}.pdf"
-    docx_path = f"/tmp/{uid}.docx"
-
-    try:
-        content = await file.read()
-        with open(pdf_path, "wb") as f:
-            f.write(content)
-        cv = Converter(pdf_path)
-        cv.convert(docx_path)
-        cv.close()
-        with open(docx_path, "rb") as f:
-            docx_bytes = f.read()
-        return StreamingResponse(
-            io.BytesIO(docx_bytes),
-            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            headers={"Content-Disposition": f'attachment; filename="{file.filename.replace(".pdf", ".docx")}"'}
-        )
-    finally:
-        for p in [pdf_path, docx_path]:
-            if os.path.exists(p):
-                os.remove(p)
-
-
-# ─────────────────────────────────────────────
-# ENDPOINT : /health
-# ─────────────────────────────────────────────
-@app.get("/health")
-def health():
-    return {"status": "ok", "version": "2.0"}
-
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
