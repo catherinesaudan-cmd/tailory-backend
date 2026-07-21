@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: tailory-backend-v2
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    # Render fournit automatiquement la variable d'environnement PORT.
+    # Plus besoin de buildCommand / startCommand : tout est dans le Dockerfile.

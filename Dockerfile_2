@@ -1,0 +1,24 @@
+# Tailory Backend V2 — image Docker
+# Python + LibreOffice headless pour rasteriser les images vectorielles
+# (EMF/WMF/TIFF) des DOCX en PNG affichables. Solution générique tous formats.
+FROM python:3.11-slim
+
+# LibreOffice (composants Draw + core) : convertit EMF/WMF/TIFF → PNG.
+# fontconfig + polices de base pour un rendu correct du texte éventuel.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libreoffice-draw \
+        libreoffice-core \
+        fonts-dejavu-core \
+        fontconfig \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+# Render fournit la variable PORT ; repli 8000 en local.
+CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${PORT:-8000}"]
