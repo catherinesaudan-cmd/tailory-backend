@@ -567,3 +567,190 @@ async def export_docx(request: Request):
     def add_image_to_para(para, img_data: str):
         """Ajoute une image base64 à un paragraphe."""
         if not img_data or not img_data.startswith("data:"):
+            return
+        try:
+            _, b64 = img_data.split(",", 1)
+            img_bytes = base64.b64decode(b64)
+            img_stream = io.BytesIO(img_bytes)
+            run = para.add_run()
+            run.add_picture(img_stream, width=Inches(1.5))
+        except Exception:
+            pass
+
+    def add_exercise_header(title: str, num: int):
+        para = doc.add_paragraph()
+        run = para.add_run(f"Exercice {num} — {title.upper()}")
+        run.bold = True
+        run.font.size = Pt(10)
+        run.font.color.rgb = RGBColor(0x6e, 0xb7, 0x9e)
+
+    def add_consigne(text: str):
+        para = doc.add_paragraph()
+        run = para.add_run(text)
+        run.bold = True
+        run.font.size = Pt(13)
+
+    def add_response_line(label: str = ""):
+        para = doc.add_paragraph()
+        if label:
+            para.add_run(f"{label} ").bold = True
+        para.add_run("_" * 20)
+
+    def build_relier_table(images, words):
+        """Template fixe pour exercice relier : image | • | mot"""
+        if not words:
+            return
+        table = doc.add_table(rows=len(words), cols=3)
+        table.style = "Table Grid"
+        for i, word in enumerate(words):
+            row = table.rows[i]
+            # Colonne image
+            cell_img = row.cells[0]
+            if i < len(images):
+                para = cell_img.paragraphs[0]
+                para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                add_image_to_para(para, images[i]["data"])
+            # Colonne point
+            row.cells[1].text = "•"
+            row.cells[1].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+            # Colonne mot
+            row.cells[2].text = word
+            row.cells[2].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.LEFT
+
+    ex_num = 0
+    for exercise in exercises:
+        ex_type = exercise.get("exercise_type", "autre")
+        consigne = exercise.get("adapted_consigne") or exercise.get("consigne", "")
+        blocks = exercise.get("adapted_blocks") or exercise.get("blocks", [])
+        images = exercise.get("all_images", [])
+
+        if ex_type == "header":
+            for block in blocks:
+                if block.get("text"):
+                    doc.add_paragraph(block["text"])
+            continue
+
+        ex_num += 1
+
+        # En-tête exercice
+        add_exercise_header(ex_type, ex_num)
+
+        # Consigne
+        if consigne:
+            add_consigne(consigne)
+
+        # Corps selon le type d'exercice
+        if ex_type == "relier":
+            # Extraire les mots de la colonne droite depuis les blocs
+            words = [
+                b["text"] for b in blocks
+                if b.get("text") and not b.get("is_consigne")
+                and len(b["text"].split()) <= 4
+            ]
+            build_relier_table(images, words)
+
+        elif ex_type in ("compléter", "numéroter"):
+            for block in blocks:
+                if block.get("is_consigne"):
+                    continue
+                if block["type"] == "table":
+                    # Reconstruire le tableau
+                    rows = block.get("rows", [])
+                    if rows:
+                        t = doc.add_table(rows=len(rows), cols=len(rows[0]))
+                        t.style = "Table Grid"
+                        for i, row in enumerate(rows):
+                            for j, cell in enumerate(row):
+                                t.rows[i].cells[j].text = cell.get("text", "")
+                else:
+                    text = block.get("text", "")
+                    if text:
+                        doc.add_paragraph(text)
+                    if block.get("images"):
+                        para = doc.add_paragraph()
+                        for img in block["images"][:2]:
+                            add_image_to_para(para, img["data"])
+
+        elif ex_type == "classer":
+            # Tableau découpe compact
+            all_items = [
+                b["text"] for b in blocks
+                if b.get("text") and not b.get("is_consigne")
+            ]
+            if all_items:
+                t = doc.add_table(rows=len(all_items), cols=2)
+                t.style = "Table Grid"
+                for i, item in enumerate(all_items):
+                    t.rows[i].cells[0].text = str(i + 1)
+                    t.rows[i].cells[1].text = ""  # case réponse
+
+        else:
+            # Fallback : texte + images
+            for block in blocks:
+                if block.get("is_consigne"):
+                    continue
+                if block.get("text"):
+                    doc.add_paragraph(block["text"])
+                for img in block.get("images", [])[:2]:
+                    para = doc.add_paragraph()
+                    add_image_to_para(para, img["data"])
+
+        # Séparateur
+        doc.add_paragraph("─" * 30)
+
+    # Sauvegarder et retourner
+    buf = io.BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
+
+
+# ─────────────────────────────────────────────
+# ENDPOINT : /convert (existant — conservé)
+# PDF → DOCX
+# ─────────────────────────────────────────────
+@app.post("/convert")
+async def convert_pdf(file: UploadFile = File(...)):
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(400, "Format PDF requis")
+
+    uid = str(uuid.uuid4())[:8]
+    pdf_path = f"/tmp/{uid}.pdf"
+    docx_path = f"/tmp/{uid}.docx"
+
+    try:
+        content = await file.read()
+        with open(pdf_path, "wb") as f:
+            f.write(content)
+        cv = Converter(pdf_path)
+        cv.convert(docx_path)
+        cv.close()
+        with open(docx_path, "rb") as f:
+            docx_bytes = f.read()
+        return StreamingResponse(
+            io.BytesIO(docx_bytes),
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers={"Content-Disposition": f'attachment; filename="{file.filename.replace(".pdf", ".docx")}"'}
+        )
+    finally:
+        for p in [pdf_path, docx_path]:
+            if os.path.exists(p):
+                os.remove(p)
+
+
+# ─────────────────────────────────────────────
+# ENDPOINT : /health
+# ─────────────────────────────────────────────
+@app.get("/health")
+def health():
+    return {"status": "ok", "version": "2.0"}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
