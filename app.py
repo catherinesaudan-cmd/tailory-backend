@@ -1,12 +1,9 @@
 """
-Tailory Backend V2.1.1 — Pipeline documentaire pédagogique
+Tailory Backend V2 — Pipeline documentaire pédagogique
 FastAPI + python-docx + pdf2docx + Anthropic proxy
 
 Endpoints:
-  POST /parse    → DOCX/PDF/ODT → structure JSON pédagogique
-                   (ODT : converti en PDF via LibreOffice puis pipeline PDF —
-                    indispensable car les ODT contiennent souvent des formes
-                    vectorielles natives invisibles pour l'extracteur DOCX)
+  POST /parse    → DOCX/PDF → structure JSON pédagogique
   POST /generate → proxy Anthropic avec retry + chunking
   POST /export   → structure JSON adaptée → DOCX
   POST /convert  → PDF → DOCX (existant, conservé)
@@ -24,9 +21,6 @@ import os
 import time
 import uuid
 import zipfile
-import glob
-import tempfile
-import subprocess
 from typing import Optional
 
 # python-docx
@@ -197,157 +191,19 @@ def parse_pdf(content: bytes, filename: str):
 
 
 # ─────────────────────────────────────────────
-# DOCX : rasterisation générique des images non-web
-# (EMF / WMF / TIFF / vectoriels) → PNG via LibreOffice
-# ─────────────────────────────────────────────
-_WEB_SAFE = ("png", "jpeg", "jpg", "gif", "webp", "bmp")
-# Fragments de content-type non affichables par un navigateur → extension LibreOffice
-_NONWEB_EXT = {
-    "x-emf": "emf", "emf": "emf",
-    "x-wmf": "wmf", "wmf": "wmf",
-    "tiff": "tiff", "tif": "tiff",
-}
-
-
-def _is_web_safe(ct: str) -> bool:
-    ct = (ct or "").lower()
-    return any(w in ct for w in _WEB_SAFE)
-
-
-def _nonweb_ext(ct: str):
-    ct = (ct or "").lower()
-    for frag, ext in _NONWEB_EXT.items():
-        if frag in ct:
-            return ext
-    return None
-
-
-def _autocrop_png(png_bytes: bytes, pad: int = 6) -> bytes:
-    """Rogne les marges blanches d'un PNG (LibreOffice exporte une page entière)."""
-    try:
-        from PIL import Image, ImageChops
-        im = Image.open(io.BytesIO(png_bytes)).convert("RGB")
-        bg = Image.new("RGB", im.size, (255, 255, 255))
-        bbox = ImageChops.difference(im, bg).getbbox()
-        if bbox:
-            l, t, r, b = bbox
-            l = max(0, l - pad); t = max(0, t - pad)
-            r = min(im.width, r + pad); b = min(im.height, b + pad)
-            if r > l and b > t:
-                im = im.crop((l, t, r, b))
-        out = io.BytesIO()
-        im.save(out, "PNG")
-        return out.getvalue()
-    except Exception:
-        return png_bytes
-
-
-def rasterize_blobs(jobs):
-    """
-    jobs : liste de (key, blob_bytes, ext).
-    Convertit TOUTES les images non-web en PNG en UNE seule invocation LibreOffice
-    (rapide), puis autocrop. Retourne {key: png_bytes}. Robuste : en cas d'échec,
-    la clé est simplement absente du résultat (→ placeholder côté frontend).
-    """
-    result = {}
-    if not jobs:
-        return result
-    with tempfile.TemporaryDirectory() as td:
-        names = {}
-        srcpaths = []
-        for i, (key, blob, ext) in enumerate(jobs):
-            fn = f"img{i}.{ext}"
-            path = os.path.join(td, fn)
-            with open(path, "wb") as f:
-                f.write(blob)
-            names[f"img{i}"] = key
-            srcpaths.append(path)
-        try:
-            subprocess.run(
-                ["soffice", "--headless", "--convert-to", "png", "--outdir", td] + srcpaths,
-                timeout=180, capture_output=True,
-                env={**os.environ, "HOME": td},  # profil LibreOffice inscriptible
-            )
-        except Exception:
-            return result
-        for png in glob.glob(os.path.join(td, "*.png")):
-            base = os.path.splitext(os.path.basename(png))[0]
-            if base in names:
-                try:
-                    with open(png, "rb") as f:
-                        result[names[base]] = _autocrop_png(f.read())
-                except Exception:
-                    pass
-    return result
-
-
-# ─────────────────────────────────────────────
-# ODT (et formats bureautiques) : conversion → PDF via LibreOffice
-# La route ODT→PDF est volontaire : les ODT contiennent souvent des formes
-# vectorielles dessinées nativement (quadrillages, figures géométriques…)
-# qui seraient PERDUES en ODT→DOCX (DrawingML non extrait), alors que le
-# pipeline PDF/PyMuPDF les récupère comme figures via get_drawings().
-# ─────────────────────────────────────────────
-def convert_office_to_pdf(content: bytes, ext: str):
-    """
-    Convertit un document bureautique (odt, doc, rtf…) en PDF via LibreOffice.
-    Retourne (pdf_bytes, "") en cas de succès, (None, message_erreur) sinon —
-    le message contient la sortie de soffice pour diagnostiquer sans deviner.
-    """
-    with tempfile.TemporaryDirectory() as td:
-        src = os.path.join(td, f"doc.{ext}")
-        with open(src, "wb") as f:
-            f.write(content)
-        try:
-            proc = subprocess.run(
-                ["soffice", "--headless", "--convert-to", "pdf", "--outdir", td, src],
-                timeout=180, capture_output=True,
-                env={**os.environ, "HOME": td},  # profil LibreOffice inscriptible
-            )
-        except subprocess.TimeoutExpired:
-            return None, "timeout soffice (180 s)"
-        except Exception as e:
-            return None, f"soffice injoignable : {e}"
-        pdf_path = os.path.join(td, "doc.pdf")
-        if not os.path.exists(pdf_path):
-            out = (proc.stdout or b"").decode(errors="replace")[-300:]
-            err = (proc.stderr or b"").decode(errors="replace")[-300:]
-            return None, f"soffice n'a pas produit de PDF. stdout: {out} | stderr: {err}"
-        with open(pdf_path, "rb") as f:
-            return f.read(), ""
-
-
-# ─────────────────────────────────────────────
 # ENDPOINT : /parse
-# DOCX / PDF / ODT → structure JSON pédagogique
+# DOCX → structure JSON pédagogique
 # ─────────────────────────────────────────────
 @app.post("/parse")
 async def parse_document(file: UploadFile = File(...)):
     """
-    Reçoit un DOCX, un PDF ou un ODT.
+    Reçoit un DOCX ou PDF.
     Retourne une structure JSON avec blocs texte, images, tableaux,
     type d'exercice détecté, et positions relatives.
-    ODT : converti en PDF (LibreOffice) puis traité par le pipeline PDF.
     """
     content = await file.read()
     filename = file.filename or "document"
     ext = filename.rsplit(".", 1)[-1].lower()
-
-    # ODT (LibreOffice) : conversion en PDF puis pipeline PDF existant.
-    # (le même mécanisme fonctionnerait pour doc/rtf si besoin un jour)
-    if ext == "odt":
-        pdf_bytes, conv_err = convert_office_to_pdf(content, ext)
-        if pdf_bytes is None:
-            raise HTTPException(
-                422, f"Conversion ODT→PDF échouée (LibreOffice) : {conv_err}. "
-                     "Exportez le document en PDF depuis LibreOffice et réessayez.")
-        result = parse_pdf(pdf_bytes, filename)
-        result["source_format"] = "odt"
-        # Joindre le PDF converti si assez petit pour être transmis à l'IA
-        # comme document natif (limite frontend : 150 000 caractères base64).
-        if len(pdf_bytes) * 4 / 3 < 150_000:
-            result["pdf_b64"] = base64.b64encode(pdf_bytes).decode()
-        return result
 
     # PDF : extraction directe PyMuPDF (images raster + figures vectorielles)
     if ext == "pdf":
@@ -359,40 +215,21 @@ async def parse_document(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(400, f"Impossible de lire le document : {e}")
 
-    # Extraire toutes les images du document.
-    # Les images web (png/jpeg/…) sont encodées telles quelles ; les formats
-    # non affichables par un navigateur (EMF/WMF/TIFF vectoriels des DOCX Word)
-    # sont rasterisés en PNG via LibreOffice — solution GÉNÉRIQUE, tous formats.
+    # Extraire toutes les images du document
     images = {}
-    raster_jobs = []
     for rId, rel in doc.part.rels.items():
         if "image" in rel.target_ref:
             try:
                 img_blob = rel.target_part.blob
+                img_b64 = base64.b64encode(img_blob).decode()
                 content_type = rel.target_part.content_type or "image/png"
-                if _is_web_safe(content_type):
-                    img_b64 = base64.b64encode(img_blob).decode()
-                    images[rId] = {
-                        "data": f"data:{content_type};base64,{img_b64}",
-                        "content_type": content_type,
-                        "size": len(img_blob)
-                    }
-                else:
-                    # EMF/WMF/TIFF/… → à rasteriser (une seule passe LibreOffice)
-                    raster_jobs.append((rId, img_blob, _nonweb_ext(content_type) or "emf"))
+                images[rId] = {
+                    "data": f"data:{content_type};base64,{img_b64}",
+                    "content_type": content_type,
+                    "size": len(img_blob)
+                }
             except Exception:
                 pass
-
-    # Rasterisation groupée des images non-web → PNG affichables
-    for rId, png in rasterize_blobs(raster_jobs).items():
-        img_b64 = base64.b64encode(png).decode()
-        images[rId] = {
-            "data": f"data:image/png;base64,{img_b64}",
-            "content_type": "image/png",
-            "size": len(png)
-        }
-    # Les images non converties (ex : WDP illisible) sont simplement absentes :
-    # le frontend affichera alors un placeholder étiqueté « coller ici ».
 
     # Construire les blocs
     blocks = []
@@ -417,7 +254,7 @@ async def parse_document(file: UploadFile = File(...)):
     def process_paragraph(para):
         text = para.text.strip()
         imgs = extract_paragraph_images(para._element)
-
+        
         if not text and not imgs:
             return None
 
@@ -804,7 +641,7 @@ async def convert_pdf(file: UploadFile = File(...)):
 # ─────────────────────────────────────────────
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "2.1.1"}
+    return {"status": "ok", "version": "2.0"}
 
 
 if __name__ == "__main__":
