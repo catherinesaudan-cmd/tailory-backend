@@ -1,5 +1,5 @@
 """
-Tailory Backend V2.2 — Pipeline documentaire pédagogique
+Tailory Backend V2.3 — Pipeline documentaire pédagogique
 FastAPI + python-docx + pdf2docx + Anthropic proxy
 
 Endpoints:
@@ -11,6 +11,30 @@ Endpoints:
   POST /export   → structure JSON adaptée → DOCX
   POST /convert  → PDF → DOCX (existant, conservé)
   GET  /health   → vérification
+
+V2.3 (retours essais 25-29) :
+  · FONDS DE PAGE : les rectangles couvrant > 85 % de la page (LibreOffice
+    exporte un fond blanc pleine page selon le modèle de document) sont exclus
+    AVANT clustering — en v2.2 un tel fond absorbait toutes les régions en un
+    cluster pleine page, jeté ensuite → 0 figure transmise (cas essai 27 :
+    les 15 images d'animaux et les schémas existaient dans la source).
+  · RE-SPLIT : un cluster qui couvre malgré tout > 85 % de la page est
+    re-clusterisé plus finement (marge 6) au lieu d'être jeté ; en dernier
+    recours, ses primitives pleines sont conservées individuellement.
+  · LIGNES FINES : les segments à mesurer et lignes graduées (une dimension
+    quasi nulle, l'autre ≥ 40 pt) sont désormais capturés comme figures —
+    en v2.2 le filtre « dim < 10 » les jetait (cas essai 29 : segments a-f
+    « non disponibles » alors qu'ils existaient). Ils partent avec leur
+    taille physique réelle (w_mm/h_mm du clip rasterisé) pour l'impression
+    à l'échelle (class="img-echelle") — mesure à la règle valide.
+    Anti-bruit, une ligne fine n'est une figure QUE si :
+      - elle est isolée (rien à moins de 3 pt — élimine les bordures de
+        tableaux, qui se croisent aux coins),
+      - elle n'est pas un souligné de texte (texte juste au-dessus couvrant
+        ≥ 60 % de sa longueur),
+      - elle n'appartient pas à une famille de ≥ 3 lignes parallèles de même
+        longueur (lignes d'écriture, grilles) — les segments à mesurer ont
+        des longueurs toutes différentes, c'est le principe de l'exercice.
 """
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Request
@@ -77,7 +101,7 @@ def detect_exercise_type(text: str) -> str:
 
 
 # ─────────────────────────────────────────────
-# PDF : extraction PyMuPDF — raster + vectoriel
+# PDF : extraction PyMuPDF — raster + vectoriel + lignes fines (v2.3)
 # ─────────────────────────────────────────────
 import fitz  # PyMuPDF, déjà installé (dépendance pdf2docx)
 
@@ -106,13 +130,103 @@ def _cluster_rects(rects, margin=14.0):
     return rects
 
 
+def _is_underline_of_text(words, t):
+    """Ligne horizontale = souligné si du texte juste au-dessus (≤ 10 pt)
+    couvre ≥ 60 % de sa longueur."""
+    if t.height > t.width:
+        return False
+    cover = 0.0
+    for w in words:
+        x0, y0, x1, y1 = w[:4]
+        if y1 <= t.y0 + 2 and t.y0 - y1 < 10:
+            ov = min(x1, t.x1) - max(x0, t.x0)
+            if ov > 0:
+                cover += ov
+    return cover >= 0.6 * t.width
+
+
+def _collect_page_regions(page):
+    """
+    Régions candidates d'une page, en deux familles :
+    - solids : images raster + tracés vectoriels « pleins »
+    - thins  : lignes fines légitimes (segments à mesurer, lignes graduées)
+    Filtres : fonds de page (> 85 % de l'aire), séparateurs pleine largeur,
+    micro-tracés, soulignés de texte, bordures de tableaux (non isolées),
+    familles de lignes identiques (lignes d'écriture, grilles).
+    """
+    pw, ph = page.rect.width, page.rect.height
+    page_area = pw * ph
+    solids, thins = [], []
+
+    # 1. Images raster
+    for img in page.get_images(full=True):
+        try:
+            for rect in page.get_image_rects(img[0]):
+                if rect.width > 12 and rect.height > 12:
+                    if rect.width * rect.height > 0.85 * page_area:
+                        continue  # image de fond pleine page
+                    solids.append(fitz.Rect(rect))
+        except Exception:
+            pass
+
+    # 2. Tracés vectoriels
+    try:
+        for d in page.get_drawings():
+            r = d.get("rect")
+            if r is None:
+                continue
+            if r.width > 0.92 * pw and r.height < 20:
+                continue  # ligne de séparation pleine largeur
+            if r.width * r.height > 0.85 * page_area:
+                continue  # FOND DE PAGE (v2.3) — absorbait tout en v2.2
+            if r.width < 10 and r.height < 10:
+                continue  # micro-tracé
+            if r.width < 10 or r.height < 10:
+                # Ligne fine : candidate seulement si assez longue pour être
+                # une figure (segment, ligne graduée), pas un simple tiret
+                if max(r.width, r.height) >= 40:
+                    thins.append(fitz.Rect(r))
+                continue
+            solids.append(fitz.Rect(r))
+    except Exception:
+        pass
+
+    # 3. Anti-bruit lignes fines
+    if thins:
+        words = page.get_text("words")
+
+        def _isolated(t):
+            probe = fitz.Rect(t.x0 - 3, t.y0 - 3, t.x1 + 3, t.y1 + 3)
+            if any(probe.intersects(o) for o in solids):
+                return False
+            return not any((o is not t) and probe.intersects(o) for o in thins)
+
+        thins = [t for t in thins if _isolated(t)]
+        thins = [t for t in thins if not _is_underline_of_text(words, t)]
+
+        kept = []
+        for t in thins:
+            horiz = t.width >= t.height
+            L = t.width if horiz else t.height
+            same = sum(1 for o in thins
+                       if (o.width >= o.height) == horiz
+                       and abs((o.width if horiz else o.height) - L) <= 0.05 * L)
+            if same < 3:
+                kept.append(t)
+        thins = kept
+
+    return solids, thins
+
+
 def parse_pdf(content: bytes, filename: str):
     """
     Extrait d'un PDF, dans l'ordre de lecture :
     - les images raster (photos, dessins importés)
     - les figures vectorielles (tracés regroupés puis rasterisés en PNG 2x)
+    - les lignes fines légitimes (segments à mesurer, lignes graduées) — v2.3
     - le texte complet
-    Les zones de figures sont détectées via get_drawings() + clustering.
+    Chaque figure part avec sa taille physique (w_mm/h_mm du clip rasterisé)
+    pour l'impression à l'échelle réelle (class="img-echelle").
     """
     doc = fitz.open(stream=content, filetype="pdf")
     images = []
@@ -122,53 +236,63 @@ def parse_pdf(content: bytes, filename: str):
     for pno, page in enumerate(doc):
         pw, ph = page.rect.width, page.rect.height
         page_area = pw * ph
-        regions = []
 
-        # 1. Rectangles des images raster
-        for img in page.get_images(full=True):
-            try:
-                for rect in page.get_image_rects(img[0]):
-                    if rect.width > 12 and rect.height > 12:
-                        regions.append(rect)
-            except Exception:
-                pass
+        solids, thins = _collect_page_regions(page)
+        regions = solids + thins
 
-        # 2. Rectangles des tracés vectoriels (figures dessinées)
-        try:
-            for d in page.get_drawings():
-                r = d.get("rect")
-                if r is None:
-                    continue
-                # Ignorer traits fins pleine largeur (lignes de séparation,
-                # lignes de réponse) et micro-tracés
-                if r.width < 10 or r.height < 10:
-                    continue
-                if r.width > 0.92 * pw and r.height < 20:
-                    continue
-                regions.append(r)
-        except Exception:
-            pass
-
-        # 3. Clustering : tracés voisins = une figure
+        # Clustering : tracés voisins = une figure
         clusters = _cluster_rects(regions)
 
-        # 4. Filtres : trop petit, ou boîte de fond couvrant la page
-        keep = []
-        for r in clusters:
-            r = r & page.rect  # borner à la page
-            if r.width < 24 or r.height < 24:
+        # Re-split (v2.3) : un cluster quasi pleine page n'est plus jeté,
+        # il est re-clusterisé plus finement ; en dernier recours, ses
+        # primitives pleines sont gardées individuellement.
+        final = []
+        for c in clusters:
+            c = c & page.rect
+            if c.width * c.height <= 0.85 * page_area:
+                final.append(c)
+                continue
+            subs = _cluster_rects([r for r in regions if r.intersects(c)], margin=6.0)
+            for s in subs:
+                s = s & page.rect
+                if s.width * s.height <= 0.85 * page_area:
+                    final.append(s)
+                else:
+                    final.extend(r for r in solids
+                                 if r.intersects(s) and r.width >= 24 and r.height >= 24)
+
+        # Filtres finaux : figures pleines OU lignes fines assez longues
+        keep, seen = [], set()
+        for r in final:
+            r = r & page.rect
+            key = (round(r.x0), round(r.y0), round(r.x1), round(r.y1))
+            if key in seen:
+                continue
+            seen.add(key)
+            full = r.width >= 24 and r.height >= 24
+            slim = min(r.width, r.height) < 24 and max(r.width, r.height) >= 40
+            if not (full or slim):
                 continue
             if (r.width * r.height) > 0.85 * page_area:
                 continue
             keep.append(r)
 
-        # 5. Ordre de lecture : haut → bas, gauche → droite
+        # Ordre de lecture : haut → bas, gauche → droite
         keep.sort(key=lambda r: (round(r.y0 / 24), r.x0))
 
-        # 6. Rasterisation 2x de chaque zone
+        # Rasterisation 2x de chaque zone
         for r in keep:
             try:
-                pix = page.get_pixmap(clip=r, matrix=fitz.Matrix(2, 2))
+                # Lignes fines : dilater le clip pour que le trait soit
+                # visible ; w_mm/h_mm décrivent le CLIP rasterisé, donc
+                # l'échelle réelle reste exacte à l'impression.
+                clip = fitz.Rect(r)
+                if r.height < 24 and r.width >= r.height:
+                    clip = fitz.Rect(r.x0 - 3, r.y0 - 6, r.x1 + 3, r.y1 + 6)
+                elif r.width < 24:
+                    clip = fitz.Rect(r.x0 - 6, r.y0 - 3, r.x1 + 6, r.y1 + 3)
+                clip = clip & page.rect
+                pix = page.get_pixmap(clip=clip, matrix=fitz.Matrix(2, 2))
                 if pix.width < 8 or pix.height < 8:
                     continue
                 b64 = base64.b64encode(pix.tobytes("png")).decode()
@@ -177,12 +301,12 @@ def parse_pdf(content: bytes, filename: str):
                     "page": pno + 1,
                     "data": f"data:image/png;base64,{b64}",
                     "w": pix.width, "h": pix.height,
-                    # Taille PHYSIQUE de la zone dans le document source
-                    # (points PDF → mm : 1 pt = 25.4/72 mm). Permet au frontend
-                    # d'imprimer la figure à taille réelle (class="img-echelle")
-                    # pour les exercices de mesure à la règle.
-                    "w_mm": round(r.width * 25.4 / 72, 1),
-                    "h_mm": round(r.height * 25.4 / 72, 1),
+                    # Taille PHYSIQUE de la zone rasterisée dans le document
+                    # source (points PDF → mm : 1 pt = 25.4/72 mm). Permet au
+                    # frontend d'imprimer la figure à taille réelle
+                    # (class="img-echelle") pour la mesure à la règle.
+                    "w_mm": round(clip.width * 25.4 / 72, 1),
+                    "h_mm": round(clip.height * 25.4 / 72, 1),
                 })
                 idx += 1
             except Exception:
@@ -810,7 +934,7 @@ async def convert_pdf(file: UploadFile = File(...)):
 # ─────────────────────────────────────────────
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "2.2"}
+    return {"status": "ok", "version": "2.3"}
 
 
 if __name__ == "__main__":
