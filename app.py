@@ -192,6 +192,106 @@ def _connected_components(rects, margin=10.0):
     return out
 
 
+def _cluster_rasters(rasters, page, margin=16.0):
+    """v2.9 — Les rasters se regroupent ENTRE EUX (jamais avec les vecteurs,
+    acquis v2.8 conservé) : les scènes composées de nombreux petits rasters
+    (pièces de monnaie, billets, tas de tomates, vignettes de situations —
+    128 rasters sur la seule série 5P) partaient en figures individuelles,
+    saturaient le plafond de miniatures du frontend et sortaient en
+    « coller ici » (essai 43). Trois règles :
+    1. Composantes connexes, marge 16 pt (écarts intra-scène mesurés : 0-14,6 pt ;
+       figures distinctes du corpus : >= 18 pt).
+    2. GARDE PHOTOS : deux grands rasters (min-dim > 120 pt ~ 42 mm) sans
+       recouvrement ne fusionnent JAMAIS — les photos côte à côte restent
+       autonomes (essai 42 insectes : 15/15 photos, à ne pas casser).
+    3. SCISSION TABLEAU : un composite multi-rasters est re-scindé à chaque
+       bordure horizontale de tableau qui le traverse sans toucher aucun de
+       ses membres (collections en lignes de tableau, p5 : écarts
+       intra/inter-collections indistinguables géométriquement)."""
+    n = len(rasters)
+    if n <= 1:
+        return list(rasters)
+
+    def _gap(a, b):
+        dx = max(0.0, max(a.x0, b.x0) - min(a.x1, b.x1))
+        dy = max(0.0, max(a.y0, b.y0) - min(a.y1, b.y1))
+        return (dx * dx + dy * dy) ** 0.5
+
+    parent = list(range(n))
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            a, b = rasters[i], rasters[j]
+            if _gap(a, b) >= margin:
+                continue
+            big_a = min(a.width, a.height) > 120
+            big_b = min(b.width, b.height) > 120
+            if big_a and big_b and (a & b).is_empty:
+                continue  # garde photos : pas de fusion sans recouvrement
+            union(i, j)
+
+    comps = {}
+    for i in range(n):
+        comps.setdefault(find(i), []).append(rasters[i])
+
+    # Bordures horizontales candidates pour la scission (triplets de traits
+    # LibreOffice regroupés à 3 pt près)
+    hlines = []
+    try:
+        for d in page.get_drawings():
+            r = d.get("rect")
+            if r is not None and r.height < 4 and r.width > 100:
+                hlines.append(fitz.Rect(r))
+    except Exception:
+        pass
+
+    out = []
+    for members in comps.values():
+        if len(members) == 1:
+            out.append(members[0])
+            continue
+        bb = fitz.Rect(members[0])
+        for m in members[1:]:
+            bb |= m
+        # Coupes : bordures traversant le composite entre les membres
+        cuts = []
+        for t in hlines:
+            cy = (t.y0 + t.y1) / 2
+            if not (bb.y0 + 4 < cy < bb.y1 - 4):
+                continue
+            if t.x0 > bb.x0 + 0.2 * bb.width or t.x1 < bb.x1 - 0.2 * bb.width:
+                continue  # ne traverse pas le composite
+            if any(m.y0 < cy < m.y1 for m in members):
+                continue  # couperait un raster : pas une frontière de lignes
+            if not any(abs(c - cy) <= 3 for c in cuts):
+                cuts.append(cy)
+        if not cuts:
+            out.append(bb)
+            continue
+        cuts.sort()
+        bands = {}
+        for m in members:
+            k = sum(1 for c in cuts if c < (m.y0 + m.y1) / 2)
+            bands.setdefault(k, []).append(m)
+        for grp in bands.values():
+            gb = fitz.Rect(grp[0])
+            for m in grp[1:]:
+                gb |= m
+            out.append(gb)
+    return out
+
+
 def _drop_separator_rows(solids, pw):
     """v2.7 — RANGÉE de barres fines (h < 16 pt) alignées couvrant ensemble
     > 50 % de la largeur de page, sans voisin plein = trait de section coupé
@@ -306,6 +406,8 @@ def _collect_page_regions(page):
         if not dup:
             dedup.append(fitz.Rect(r))
     rasters = dedup
+    # v2.9 — composition des scènes multi-rasters (pièces, billets, tas…)
+    rasters = _cluster_rasters(rasters, page)
 
     # 2. Tracés vectoriels
     try:
@@ -437,8 +539,9 @@ def parse_pdf(content: bytes, filename: str):
 
         # v2.4 — chaque ligne fine part individuellement
         final.extend(thins)
-        # v2.8 — chaque raster part individuellement, sans clustering : une
-        # image importée est une unité complète, sa bbox exacte est son clip.
+        # v2.8/v2.9 — les rasters ne se mélangent jamais aux vecteurs ; depuis
+        # v2.9 les scènes multi-rasters arrivent déjà composées (et re-scindées
+        # aux bordures de tableau) par _cluster_rasters.
         final.extend(rasters)
 
         # Filtres finaux : figures pleines OU lignes fines assez longues
@@ -1131,7 +1234,7 @@ async def convert_pdf(file: UploadFile = File(...)):
 # ─────────────────────────────────────────────
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "2.8"}
+    return {"status": "ok", "version": "2.9"}
 
 
 if __name__ == "__main__":
