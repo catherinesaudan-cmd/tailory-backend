@@ -1,5 +1,5 @@
 """
-Tailory Backend V2.8 — Pipeline documentaire pédagogique
+Tailory Backend V2.9.1 — Pipeline documentaire pédagogique
 FastAPI + python-docx + pdf2docx + Anthropic proxy
 
 Endpoints:
@@ -11,6 +11,36 @@ Endpoints:
   POST /export   → structure JSON adaptée → DOCX
   POST /convert  → PDF → DOCX (existant, conservé)
   GET  /health   → vérification
+
+V2.9.1 (retour essai 44 — régression Pacôme corrigée) :
+  · COMPOSITES = SCÈNES SEULEMENT : la garde par paires de la V2.9 laissait
+    fusionner les grands rasters qui se CHEVAUCHENT (scans à marges
+    blanches) — les dessins Pacôme/Momo ont refusionné (161×153 mm) en
+    avalant le fragment « er, hululer… », le bug même de l'essai 39.
+    Un composite exige désormais >= 3 membres tous petits (min-dim
+    <= 120 pt) ; toute paire et tout composant contenant un grand raster
+    sont dissous en rasters individuels (comportement V2.8 restauré pour
+    les scans/photos/cliparts, composites conservés pour les scènes :
+    pièces, billets, tas de tomates, vignettes).
+
+V2.9 (audit essai 43, validé localement sur EvalSerie1maths5P.odt — 168 → 93 figures) :
+  · CLUSTERING RASTER-RASTER : la règle V2.8 « rasters autonomes » pulvérisait
+    les scènes composées de nombreux petits rasters (série 5P : 16 pièces de
+    monnaie, 15 tas de tomates, ~19 billets, 17 vignettes… = 128 rasters) ;
+    le plafond de miniatures du frontend saturait et le modèle déclarait
+    « non disponibles » des images existantes (essai 43 : 154 figures
+    inutilisées, 12 placeholders « coller ici »). Les rasters se regroupent
+    désormais ENTRE EUX (_cluster_rasters, marge 16 pt calibrée sur les
+    écarts mesurés : intra-scène 0-14,6 pt, figures distinctes ≥ 18 pt),
+    jamais avec les vecteurs — l'acquis V2.8 est conservé.
+  · GARDE PHOTOS : deux grands rasters (min-dim > 120 pt ≈ 42 mm) sans
+    recouvrement ne fusionnent jamais — les photos côte à côte restent
+    autonomes (essai 42 insectes : 15/15 photos, à ne pas casser).
+  · SCISSION TABLEAU : un composite multi-rasters est re-scindé à chaque
+    bordure horizontale de tableau qui le traverse sans couper aucun membre
+    (p5 de la 5P : écarts intra/inter-collections indistinguables — seules
+    les bordures séparent les 4 collections, retrouvées une à une : 1, 8,
+    4 et 3 pièces).
 
 V2.8 (retour essai 39, validé localement sur Pacomefantome.odt) :
   · RASTERS AUTONOMES : une image raster (scan, photo, dessin importé) est
@@ -201,9 +231,12 @@ def _cluster_rasters(rasters, page, margin=16.0):
     « coller ici » (essai 43). Trois règles :
     1. Composantes connexes, marge 16 pt (écarts intra-scène mesurés : 0-14,6 pt ;
        figures distinctes du corpus : >= 18 pt).
-    2. GARDE PHOTOS : deux grands rasters (min-dim > 120 pt ~ 42 mm) sans
-       recouvrement ne fusionnent JAMAIS — les photos côte à côte restent
-       autonomes (essai 42 insectes : 15/15 photos, à ne pas casser).
+    2. SCÈNES SEULEMENT (v2.9.1, retour essai 44) : un composite exige
+       >= 3 membres TOUS petits (min-dim <= 120 pt ~ 42 mm). Tout composant
+       contenant un grand raster (scan, photo, clipart) ou réduit à une paire
+       est dissous en rasters individuels : les scans à marges blanches qui se
+       chevauchent (Pacôme/Momo, essai 39 et 44) et les photos côte à côte
+       (essai 42 insectes) ne fusionnent jamais.
     3. SCISSION TABLEAU : un composite multi-rasters est re-scindé à chaque
        bordure horizontale de tableau qui le traverse sans toucher aucun de
        ses membres (collections en lignes de tableau, p5 : écarts
@@ -232,18 +265,28 @@ def _cluster_rasters(rasters, page, margin=16.0):
 
     for i in range(n):
         for j in range(i + 1, n):
-            a, b = rasters[i], rasters[j]
-            if _gap(a, b) >= margin:
-                continue
-            big_a = min(a.width, a.height) > 120
-            big_b = min(b.width, b.height) > 120
-            if big_a and big_b and (a & b).is_empty:
-                continue  # garde photos : pas de fusion sans recouvrement
-            union(i, j)
+            if _gap(rasters[i], rasters[j]) < margin:
+                union(i, j)
 
     comps = {}
     for i in range(n):
         comps.setdefault(find(i), []).append(rasters[i])
+
+    # v2.9.1 — FILTRE AU NIVEAU DU COMPOSANT (retour essai 44 : régression sur
+    # Pacôme). La garde v2.9 par paires (« deux grands rasters SANS recouvrement
+    # ne fusionnent pas ») laissait passer les scans à marges blanches qui se
+    # CHEVAUCHENT — exactement le bug de l'essai 39 que la V2.8 avait éliminé :
+    # les dessins de Pacôme et Momo ont refusionné en un composite de
+    # 161×153 mm avalant le fragment « er, hululer… » de la banque de mots.
+    # Nouvelle règle : un composite n'est légitime que pour une SCÈNE —
+    # au moins 3 membres, TOUS petits (min-dim <= 120 pt ~ 42 mm : pièces,
+    # billets, tas, vignettes). Tout composant contenant un grand raster, ou
+    # réduit à une paire, est dissous en rasters individuels (comportement
+    # V2.8). Les scans, photos et cliparts ne fusionnent donc plus jamais,
+    # avec ou sans recouvrement.
+    def _scene(members):
+        return len(members) >= 3 and all(
+            min(m.width, m.height) <= 120 for m in members)
 
     # Bordures horizontales candidates pour la scission (triplets de traits
     # LibreOffice regroupés à 3 pt près)
@@ -260,6 +303,9 @@ def _cluster_rasters(rasters, page, margin=16.0):
     for members in comps.values():
         if len(members) == 1:
             out.append(members[0])
+            continue
+        if not _scene(members):
+            out.extend(members)  # v2.9.1 — pas une scène : chacun reste autonome
             continue
         bb = fitz.Rect(members[0])
         for m in members[1:]:
@@ -1234,7 +1280,7 @@ async def convert_pdf(file: UploadFile = File(...)):
 # ─────────────────────────────────────────────
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "2.9"}
+    return {"status": "ok", "version": "2.9.1"}
 
 
 if __name__ == "__main__":
