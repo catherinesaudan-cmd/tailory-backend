@@ -45,6 +45,7 @@ import base64
 import io
 import json
 import os
+import re
 import time
 import uuid
 import zipfile
@@ -246,6 +247,23 @@ def parse_pdf(content: bytes, filename: str):
         page_area = pw * ph
 
         solids, thins = _collect_page_regions(page)
+
+        # v2.5 — les lignes fines ne partent que si la page parle de mesure ou
+        # de tracé : sur une fiche de français, les lignes de réponse aux
+        # longueurs variées traversent le filtre « familles » (28 fausses
+        # lignes sur la série de conjugaison 5P) et noieraient le modèle sous
+        # des « segments » sans objet. Mots-clés calibrés sur les 9 sources :
+        # les pages segments/périmètres/aires/quadrillages en contiennent
+        # toutes au moins un, aucune page de français n'en contient.
+        if thins:
+            ptxt = page.get_text("text").lower()
+            if not (any(k in ptxt for k in (
+                    "mesur", "segment", "périmètre", "perimetre",
+                    "centimètre", "centimetre", "millimètre", "millimetre",
+                    "gradu", "quadrill", "trace", "construc",
+                    "géométr", "geometr"))
+                    or re.search(r"\baires?\b", ptxt)):  # « aire » en mot entier — pas « faire »
+                thins = []
 
         # v2.4 — les lignes fines ne sont JAMAIS clusterisées : une ligne qui a
         # survécu aux filtres anti-bruit est un segment autonome à mesurer.
@@ -971,7 +989,7 @@ async def convert_pdf(file: UploadFile = File(...)):
 # ─────────────────────────────────────────────
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "2.4"}
+    return {"status": "ok", "version": "2.5"}
 
 
 if __name__ == "__main__":
