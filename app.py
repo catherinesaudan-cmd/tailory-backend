@@ -71,7 +71,8 @@ app.add_middleware(
     allow_origins=[
         "https://classedobsdecath.ch",
         "http://localhost",
-        "http://127.0.0.1"
+        "http://127.0.0.1",
+        "null"  # v2.6 — fichier tailory ouvert en local (file://) : Origin: null
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -989,7 +990,7 @@ async def convert_pdf(file: UploadFile = File(...)):
 # ─────────────────────────────────────────────
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "2.5"}
+    return {"status": "ok", "version": "2.6"}
 
 
 if __name__ == "__main__":
