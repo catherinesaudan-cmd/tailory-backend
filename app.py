@@ -1,5 +1,5 @@
 """
-Tailory Backend V2.1 — Pipeline documentaire pédagogique
+Tailory Backend V2.1.1 — Pipeline documentaire pédagogique
 FastAPI + python-docx + pdf2docx + Anthropic proxy
 
 Endpoints:
@@ -291,25 +291,30 @@ def rasterize_blobs(jobs):
 def convert_office_to_pdf(content: bytes, ext: str):
     """
     Convertit un document bureautique (odt, doc, rtf…) en PDF via LibreOffice.
-    Retourne les bytes du PDF, ou None en cas d'échec.
+    Retourne (pdf_bytes, "") en cas de succès, (None, message_erreur) sinon —
+    le message contient la sortie de soffice pour diagnostiquer sans deviner.
     """
     with tempfile.TemporaryDirectory() as td:
         src = os.path.join(td, f"doc.{ext}")
         with open(src, "wb") as f:
             f.write(content)
         try:
-            subprocess.run(
+            proc = subprocess.run(
                 ["soffice", "--headless", "--convert-to", "pdf", "--outdir", td, src],
                 timeout=180, capture_output=True,
                 env={**os.environ, "HOME": td},  # profil LibreOffice inscriptible
             )
-        except Exception:
-            return None
+        except subprocess.TimeoutExpired:
+            return None, "timeout soffice (180 s)"
+        except Exception as e:
+            return None, f"soffice injoignable : {e}"
         pdf_path = os.path.join(td, "doc.pdf")
         if not os.path.exists(pdf_path):
-            return None
+            out = (proc.stdout or b"").decode(errors="replace")[-300:]
+            err = (proc.stderr or b"").decode(errors="replace")[-300:]
+            return None, f"soffice n'a pas produit de PDF. stdout: {out} | stderr: {err}"
         with open(pdf_path, "rb") as f:
-            return f.read()
+            return f.read(), ""
 
 
 # ─────────────────────────────────────────────
@@ -331,10 +336,10 @@ async def parse_document(file: UploadFile = File(...)):
     # ODT (LibreOffice) : conversion en PDF puis pipeline PDF existant.
     # (le même mécanisme fonctionnerait pour doc/rtf si besoin un jour)
     if ext == "odt":
-        pdf_bytes = convert_office_to_pdf(content, ext)
+        pdf_bytes, conv_err = convert_office_to_pdf(content, ext)
         if pdf_bytes is None:
             raise HTTPException(
-                422, "Conversion ODT→PDF échouée (LibreOffice). "
+                422, f"Conversion ODT→PDF échouée (LibreOffice) : {conv_err}. "
                      "Exportez le document en PDF depuis LibreOffice et réessayez.")
         result = parse_pdf(pdf_bytes, filename)
         result["source_format"] = "odt"
@@ -799,7 +804,7 @@ async def convert_pdf(file: UploadFile = File(...)):
 # ─────────────────────────────────────────────
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "2.1"}
+    return {"status": "ok", "version": "2.1.1"}
 
 
 if __name__ == "__main__":
