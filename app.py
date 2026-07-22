@@ -1,9 +1,12 @@
 """
-Tailory Backend V2 — Pipeline documentaire pédagogique
+Tailory Backend V2.1 — Pipeline documentaire pédagogique
 FastAPI + python-docx + pdf2docx + Anthropic proxy
 
 Endpoints:
-  POST /parse    → DOCX/PDF → structure JSON pédagogique
+  POST /parse    → DOCX/PDF/ODT → structure JSON pédagogique
+                   (ODT : converti en PDF via LibreOffice puis pipeline PDF —
+                    indispensable car les ODT contiennent souvent des formes
+                    vectorielles natives invisibles pour l'extracteur DOCX)
   POST /generate → proxy Anthropic avec retry + chunking
   POST /export   → structure JSON adaptée → DOCX
   POST /convert  → PDF → DOCX (existant, conservé)
@@ -279,19 +282,67 @@ def rasterize_blobs(jobs):
 
 
 # ─────────────────────────────────────────────
+# ODT (et formats bureautiques) : conversion → PDF via LibreOffice
+# La route ODT→PDF est volontaire : les ODT contiennent souvent des formes
+# vectorielles dessinées nativement (quadrillages, figures géométriques…)
+# qui seraient PERDUES en ODT→DOCX (DrawingML non extrait), alors que le
+# pipeline PDF/PyMuPDF les récupère comme figures via get_drawings().
+# ─────────────────────────────────────────────
+def convert_office_to_pdf(content: bytes, ext: str):
+    """
+    Convertit un document bureautique (odt, doc, rtf…) en PDF via LibreOffice.
+    Retourne les bytes du PDF, ou None en cas d'échec.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        src = os.path.join(td, f"doc.{ext}")
+        with open(src, "wb") as f:
+            f.write(content)
+        try:
+            subprocess.run(
+                ["soffice", "--headless", "--convert-to", "pdf", "--outdir", td, src],
+                timeout=180, capture_output=True,
+                env={**os.environ, "HOME": td},  # profil LibreOffice inscriptible
+            )
+        except Exception:
+            return None
+        pdf_path = os.path.join(td, "doc.pdf")
+        if not os.path.exists(pdf_path):
+            return None
+        with open(pdf_path, "rb") as f:
+            return f.read()
+
+
+# ─────────────────────────────────────────────
 # ENDPOINT : /parse
-# DOCX → structure JSON pédagogique
+# DOCX / PDF / ODT → structure JSON pédagogique
 # ─────────────────────────────────────────────
 @app.post("/parse")
 async def parse_document(file: UploadFile = File(...)):
     """
-    Reçoit un DOCX ou PDF.
+    Reçoit un DOCX, un PDF ou un ODT.
     Retourne une structure JSON avec blocs texte, images, tableaux,
     type d'exercice détecté, et positions relatives.
+    ODT : converti en PDF (LibreOffice) puis traité par le pipeline PDF.
     """
     content = await file.read()
     filename = file.filename or "document"
     ext = filename.rsplit(".", 1)[-1].lower()
+
+    # ODT (LibreOffice) : conversion en PDF puis pipeline PDF existant.
+    # (le même mécanisme fonctionnerait pour doc/rtf si besoin un jour)
+    if ext == "odt":
+        pdf_bytes = convert_office_to_pdf(content, ext)
+        if pdf_bytes is None:
+            raise HTTPException(
+                422, "Conversion ODT→PDF échouée (LibreOffice). "
+                     "Exportez le document en PDF depuis LibreOffice et réessayez.")
+        result = parse_pdf(pdf_bytes, filename)
+        result["source_format"] = "odt"
+        # Joindre le PDF converti si assez petit pour être transmis à l'IA
+        # comme document natif (limite frontend : 150 000 caractères base64).
+        if len(pdf_bytes) * 4 / 3 < 150_000:
+            result["pdf_b64"] = base64.b64encode(pdf_bytes).decode()
+        return result
 
     # PDF : extraction directe PyMuPDF (images raster + figures vectorielles)
     if ext == "pdf":
@@ -748,7 +799,7 @@ async def convert_pdf(file: UploadFile = File(...)):
 # ─────────────────────────────────────────────
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "2.0"}
+    return {"status": "ok", "version": "2.1"}
 
 
 if __name__ == "__main__":
