@@ -1,5 +1,5 @@
 """
-Tailory Backend V2.3 — Pipeline documentaire pédagogique
+Tailory Backend V2.7 — Pipeline documentaire pédagogique
 FastAPI + python-docx + pdf2docx + Anthropic proxy
 
 Endpoints:
@@ -12,6 +12,35 @@ Endpoints:
   POST /convert  → PDF → DOCX (existant, conservé)
   GET  /health   → vérification
 
+V2.7 (retours essais 36-37, validé localement sur AireDefinitionetMesure.odt) :
+  · COMPOSANTES CONNEXES : le clustering par union de bounding-box était
+    structurellement vorace — chaque fusion créait une boîte plus grande qui
+    absorbait tout ce qu'elle SURVOLAIT sans en être réellement proche.
+    Cas prouvé (essais 36-37) : le trait séparateur pointillé passait à
+    10,5 pt du tissu E → fusion → la bbox résultante (x45-185 mm)
+    intersectait D, puis C, puis B → composite unique de 169×109 mm,
+    impossible à placer figure par figure côté modèle (placeholders
+    contradictoires, « B et E » alors que C et D y étaient aussi).
+    Désormais : composantes connexes calculées sur les primitives D'ORIGINE
+    (arête si écart < marge), bbox par composante calculée À LA FIN.
+    Résultat validé : les 5 tissus A-E sortent individuellement.
+  · MARGE 14 → 10 pt : l'écart réel entre les tissus B et C est de 12,2 pt ;
+    les sous-éléments d'une même figure (cellules de grille, hachures) se
+    touchent ou restent < 10 pt. Aucune figure légitime connue du corpus
+    n'a d'écart interne de 10-14 pt.
+  · SÉPARATEURS PARTIELS : une RANGÉE de barres fines (h < 16 pt) alignées
+    couvrant ensemble > 50 % de la largeur de page, sans voisin plein,
+    est un trait de section coupé par du texte — exclue avant clustering.
+    Le filtre pleine largeur (0.92·pw) ne voyait pas ces morceaux courts.
+  · BANDES DE TEXTE : une bande plate (h < 32 pt ≈ 11 mm) contenant du texte
+    (≥ 2 mots de ≥ 3 lettres, ou 1 mot couvrant > 30 % de sa largeur) est
+    une cellule d'en-tête de tableau ou un titre décoré, PAS une figure —
+    exclue avant clustering. Validé : « Figures | Calcul de l'aire »,
+    « Exercice N », « L'aire du triangle », « Définition N » — précisément
+    les bandeaux gris qui fuyaient dans les fiches des essais 36-37.
+    Les figures plates légitimes survivent : tissus sans texte (lettres
+    vectorielles), lignes graduées (chiffres seulement).
+
 V2.3 (retours essais 25-29) :
   · FONDS DE PAGE : les rectangles couvrant > 85 % de la page (LibreOffice
     exporte un fond blanc pleine page selon le modèle de document) sont exclus
@@ -19,7 +48,7 @@ V2.3 (retours essais 25-29) :
     cluster pleine page, jeté ensuite → 0 figure transmise (cas essai 27 :
     les 15 images d'animaux et les schémas existaient dans la source).
   · RE-SPLIT : un cluster qui couvre malgré tout > 85 % de la page est
-    re-clusterisé plus finement (marge 6) au lieu d'être jeté ; en dernier
+    re-clusterisé plus finement (marge 5) au lieu d'être jeté ; en dernier
     recours, ses primitives pleines sont conservées individuellement.
   · LIGNES FINES : les segments à mesurer et lignes graduées (une dimension
     quasi nulle, l'autre ≥ 40 pt) sont désormais capturés comme figures —
@@ -103,33 +132,105 @@ def detect_exercise_type(text: str) -> str:
 
 
 # ─────────────────────────────────────────────
-# PDF : extraction PyMuPDF — raster + vectoriel + lignes fines (v2.3)
+# PDF : extraction PyMuPDF — raster + vectoriel + lignes fines
+# Clustering v2.7 : composantes connexes (fini l'absorption par bbox)
 # ─────────────────────────────────────────────
 import fitz  # PyMuPDF, déjà installé (dépendance pdf2docx)
 
 
-def _cluster_rects(rects, margin=14.0):
-    """Regroupe les rectangles qui se touchent ou sont proches (< margin pt)."""
+def _connected_components(rects, margin=10.0):
+    """v2.7 — Regroupe les primitives par COMPOSANTES CONNEXES : arête entre
+    deux primitives d'ORIGINE si leur écart < margin ; la bbox de chaque
+    composante est calculée à la fin. Remplace l'union itérative de bbox,
+    qui absorbait toute primitive SURVOLÉE par une boîte déjà fusionnée
+    sans qu'elle soit réellement proche (cas essais 36-37 : le séparateur
+    collé au tissu E entraînait D, C et B dans un composite unique)."""
     rects = [fitz.Rect(r) for r in rects]
-    merged = True
-    while merged:
-        merged = False
-        out = []
-        while rects:
-            r = rects.pop()
-            grown = fitz.Rect(r.x0 - margin, r.y0 - margin,
-                              r.x1 + margin, r.y1 + margin)
-            absorbed = []
-            for i, other in enumerate(rects):
-                if grown.intersects(other):
-                    r |= other
-                    absorbed.append(i)
-                    merged = True
-            for i in reversed(absorbed):
-                rects.pop(i)
-            out.append(r)
-        rects = out
-    return rects
+    n = len(rects)
+    parent = list(range(n))
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for i in range(n):
+        gi = fitz.Rect(rects[i].x0 - margin, rects[i].y0 - margin,
+                       rects[i].x1 + margin, rects[i].y1 + margin)
+        for j in range(i + 1, n):
+            if gi.intersects(rects[j]):
+                union(i, j)
+
+    comps = {}
+    for i in range(n):
+        comps.setdefault(find(i), []).append(rects[i])
+
+    out = []
+    for members in comps.values():
+        bb = fitz.Rect(members[0])
+        for m in members[1:]:
+            bb |= m
+        out.append(bb)
+    return out
+
+
+def _drop_separator_rows(solids, pw):
+    """v2.7 — RANGÉE de barres fines (h < 16 pt) alignées couvrant ensemble
+    > 50 % de la largeur de page, sans voisin plein = trait de section coupé
+    par du texte (« ---- Exercice 2 ---- »). Le filtre pleine largeur (0.92)
+    ne les voyait pas puisque chaque morceau est court. C'est ce trait qui,
+    passant à 10,5 pt du tissu E, déclenchait la fusion en chaîne."""
+    bars = [r for r in solids if r.height < 16]
+    others = [r for r in solids if r.height >= 16]
+    drop = set()
+    used = set()
+    for i, b in enumerate(bars):
+        if i in used:
+            continue
+        row = [i]
+        cy = (b.y0 + b.y1) / 2
+        for j, o in enumerate(bars):
+            if j != i and abs((o.y0 + o.y1) / 2 - cy) < 6:
+                row.append(j)
+        span = sum(bars[k].width for k in row)
+        if span > 0.5 * pw:
+            rowrects = [bars[k] for k in row]
+            near_full = any(
+                fitz.Rect(rr.x0 - 3, rr.y0 - 3, rr.x1 + 3, rr.y1 + 3).intersects(o)
+                for rr in rowrects for o in others)
+            if not near_full:
+                drop.update(row)
+                used.update(row)
+    return others + [b for i, b in enumerate(bars) if i not in drop]
+
+
+def _is_text_band(r, words):
+    """v2.7 — bande plate (h < 32 pt ≈ 11 mm) contenant du texte : ≥ 2 mots
+    de ≥ 3 lettres, ou 1 seul mot couvrant > 30 % de sa largeur = cellule
+    d'en-tête de tableau ou titre décoré, PAS une figure. Validé sur la
+    source aires : filtre exactement « Figures | Calcul de l'aire »,
+    « Exercice N », « L'aire du triangle », « Définition N » — les bandeaux
+    gris qui fuyaient dans les fiches. Les figures plates légitimes passent :
+    tissus (lettres vectorielles, pas de texte), lignes graduées (chiffres)."""
+    if r.height >= 32:
+        return False
+    n = 0
+    cover = 0.0
+    for w in words:
+        wr = fitz.Rect(w[:4])
+        inter = wr & r
+        if not inter.is_empty and wr.get_area() > 0 \
+                and inter.get_area() > 0.5 * wr.get_area():
+            if sum(1 for ch in w[4] if ch.isalpha()) >= 3:
+                n += 1
+                cover += wr.width
+    return n >= 2 or (n >= 1 and cover > 0.3 * r.width)
 
 
 def _is_underline_of_text(words, t):
@@ -163,6 +264,7 @@ def _collect_page_regions(page):
     Filtres : fonds de page (> 85 % de l'aire), séparateurs pleine largeur,
     micro-tracés, soulignés de texte, bordures de tableaux (non isolées),
     familles de lignes identiques (lignes d'écriture, grilles).
+    v2.7 : + rangées de séparateurs partiels, + bandes de texte (en-têtes).
     """
     pw, ph = page.rect.width, page.rect.height
     page_area = pw * ph
@@ -201,9 +303,16 @@ def _collect_page_regions(page):
     except Exception:
         pass
 
+    # 2b. v2.7 — séparateurs partiels (rangées de barres) et bandes de texte
+    # (en-têtes de tableaux, titres décorés) exclus AVANT clustering : ce sont
+    # eux qui provoquaient les fusions en chaîne et les fuites de bandeaux gris.
+    solids = _drop_separator_rows(solids, pw)
+    words_v27 = page.get_text("words")
+    solids = [r for r in solids if not _is_text_band(r, words_v27)]
+
     # 3. Anti-bruit lignes fines
     if thins:
-        words = page.get_text("words")
+        words = words_v27
 
         def _isolated(t):
             probe = fitz.Rect(t.x0 - 3, t.y0 - 3, t.x1 + 3, t.y1 + 3)
@@ -237,6 +346,7 @@ def parse_pdf(content: bytes, filename: str):
     - le texte complet
     Chaque figure part avec sa taille physique (w_mm/h_mm du clip rasterisé)
     pour l'impression à l'échelle réelle (class="img-echelle").
+    v2.7 : clustering par composantes connexes, marge 10 pt.
     """
     doc = fitz.open(stream=content, filetype="pdf")
     images = []
@@ -268,18 +378,15 @@ def parse_pdf(content: bytes, filename: str):
 
         # v2.4 — les lignes fines ne sont JAMAIS clusterisées : une ligne qui a
         # survécu aux filtres anti-bruit est un segment autonome à mesurer.
-        # L'incohérence v2.3 (isolation exigée à ±3 pt, clustering à ±14 pt)
-        # faisait fusionner les segments avec une illustration voisine : sur la
-        # page « Mesure de segments » de la série 6P, les segments a, c et f
-        # disparaissaient dans un blob de 172×67 mm et seuls b et e partaient
-        # comme lignes — d'où l'association impossible côté modèle (essai 35).
         regions = solids
 
-        # Clustering : tracés voisins = une figure
-        clusters = _cluster_rects(regions)
+        # Clustering v2.7 : composantes connexes sur les primitives d'origine,
+        # marge 10 pt (l'écart réel entre deux figures distinctes du corpus
+        # est ≥ 12 pt ; les sous-éléments d'une même figure restent < 10 pt).
+        clusters = _connected_components(regions, margin=10.0)
 
-        # Re-split (v2.3) : un cluster quasi pleine page n'est plus jeté,
-        # il est re-clusterisé plus finement ; en dernier recours, ses
+        # Re-split (v2.3, adapté v2.7) : un cluster quasi pleine page n'est pas
+        # jeté, il est re-clusterisé plus finement ; en dernier recours, ses
         # primitives pleines sont gardées individuellement.
         final = []
         for c in clusters:
@@ -287,7 +394,8 @@ def parse_pdf(content: bytes, filename: str):
             if c.width * c.height <= 0.85 * page_area:
                 final.append(c)
                 continue
-            subs = _cluster_rects([r for r in regions if r.intersects(c)], margin=6.0)
+            subs = _connected_components(
+                [r for r in regions if r.intersects(c)], margin=5.0)
             for s in subs:
                 s = s & page.rect
                 if s.width * s.height <= 0.85 * page_area:
@@ -380,7 +488,6 @@ def parse_pdf(content: bytes, filename: str):
         "text": "\n".join(full_text),
         "exercises": [],
     }
-
 
 # ─────────────────────────────────────────────
 # DOCX : rasterisation générique des images non-web
@@ -990,7 +1097,7 @@ async def convert_pdf(file: UploadFile = File(...)):
 # ─────────────────────────────────────────────
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "2.6"}
+    return {"status": "ok", "version": "2.7"}
 
 
 if __name__ == "__main__":
