@@ -1,5 +1,5 @@
 """
-Tailory Backend V2.7 — Pipeline documentaire pédagogique
+Tailory Backend V2.8 — Pipeline documentaire pédagogique
 FastAPI + python-docx + pdf2docx + Anthropic proxy
 
 Endpoints:
@@ -11,6 +11,18 @@ Endpoints:
   POST /export   → structure JSON adaptée → DOCX
   POST /convert  → PDF → DOCX (existant, conservé)
   GET  /health   → vérification
+
+V2.8 (retour essai 39, validé localement sur Pacomefantome.odt) :
+  · RASTERS AUTONOMES : une image raster (scan, photo, dessin importé) est
+    déjà une unité sémantique complète — elle n'est PLUS clusterisée, ni avec
+    les autres rasters, ni avec les vecteurs. Cas prouvé (essai 39) : trois
+    dessins scannés aux marges blanches se chevauchant fusionnaient en un
+    bloc de 180×134 mm dont la bbox avalait les lignes basses de la banque
+    de mots — le fragment de texte tronqué « er, hululer… » partait comme
+    figure et était placé tel quel sur la fiche. Seuls les rasters quasi
+    identiques (recouvrement ≥ 80 %) sont dédupliqués. Le clustering ne
+    s'applique désormais qu'aux tracés VECTORIELS (une figure = plusieurs
+    primitives), sa raison d'être.
 
 V2.7 (retours essais 36-37, validé localement sur AireDefinitionetMesure.odt) :
   · COMPOSANTES CONNEXES : le clustering par union de bounding-box était
@@ -269,17 +281,31 @@ def _collect_page_regions(page):
     pw, ph = page.rect.width, page.rect.height
     page_area = pw * ph
     solids, thins = [], []
+    rasters = []  # v2.8 — les rasters ne passent PAS par le clustering
 
-    # 1. Images raster
+    # 1. Images raster — v2.8 : chaque raster est une figure autonome.
     for img in page.get_images(full=True):
         try:
             for rect in page.get_image_rects(img[0]):
                 if rect.width > 12 and rect.height > 12:
                     if rect.width * rect.height > 0.85 * page_area:
                         continue  # image de fond pleine page
-                    solids.append(fitz.Rect(rect))
+                    rasters.append(fitz.Rect(rect))
         except Exception:
             pass
+    # Déduplication des rasters quasi identiques (recouvrement ≥ 80 %)
+    dedup = []
+    for r in rasters:
+        dup = False
+        for o in dedup:
+            inter = r & o
+            if not inter.is_empty and inter.get_area() >= 0.8 * min(r.get_area(), o.get_area()):
+                o |= r
+                dup = True
+                break
+        if not dup:
+            dedup.append(fitz.Rect(r))
+    rasters = dedup
 
     # 2. Tracés vectoriels
     try:
@@ -309,6 +335,11 @@ def _collect_page_regions(page):
     solids = _drop_separator_rows(solids, pw)
     words_v27 = page.get_text("words")
     solids = [r for r in solids if not _is_text_band(r, words_v27)]
+    # v2.8 — un cluster vectoriel entièrement contenu dans un raster serait un
+    # doublon (annotation déjà visible dans le clip du raster) : on le retire
+    # en amont pour ne pas générer deux figures du même contenu.
+    solids = [r for r in solids
+              if not any(ra.contains(r) for ra in rasters)]
 
     # 3. Anti-bruit lignes fines
     if thins:
@@ -334,7 +365,7 @@ def _collect_page_regions(page):
                 kept.append(t)
         thins = kept
 
-    return solids, thins
+    return solids, thins, rasters
 
 
 def parse_pdf(content: bytes, filename: str):
@@ -357,7 +388,7 @@ def parse_pdf(content: bytes, filename: str):
         pw, ph = page.rect.width, page.rect.height
         page_area = pw * ph
 
-        solids, thins = _collect_page_regions(page)
+        solids, thins, rasters = _collect_page_regions(page)
 
         # v2.5 — les lignes fines ne partent que si la page parle de mesure ou
         # de tracé : sur une fiche de français, les lignes de réponse aux
@@ -406,6 +437,9 @@ def parse_pdf(content: bytes, filename: str):
 
         # v2.4 — chaque ligne fine part individuellement
         final.extend(thins)
+        # v2.8 — chaque raster part individuellement, sans clustering : une
+        # image importée est une unité complète, sa bbox exacte est son clip.
+        final.extend(rasters)
 
         # Filtres finaux : figures pleines OU lignes fines assez longues
         keep, seen = [], set()
@@ -1097,7 +1131,7 @@ async def convert_pdf(file: UploadFile = File(...)):
 # ─────────────────────────────────────────────
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "2.7"}
+    return {"status": "ok", "version": "2.8"}
 
 
 if __name__ == "__main__":
