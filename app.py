@@ -131,14 +131,22 @@ def _cluster_rects(rects, margin=14.0):
 
 
 def _is_underline_of_text(words, t):
-    """Ligne horizontale = souligné si du texte juste au-dessus (≤ 10 pt)
-    couvre ≥ 60 % de sa longueur."""
+    """Ligne horizontale = souligné si du texte immédiatement au-dessus
+    couvre ≥ 60 % de sa longueur.
+    v2.4 — tolérance élargie : les jambages (descenders) du texte souligné
+    descendent SOUS le trait ; mesuré sur les sources réelles, le bas des mots
+    est 1,7 à 1,9 pt sous le haut du trait, et l'ancienne condition
+    « y1 <= t.y0 + 2 » ne tenait qu'à 0,1 pt près — d'où le soulignement du
+    titre « Remplir un tableau… » transmis comme segment par le serveur
+    (métriques de police différentes). Fenêtre désormais : bas du mot entre
+    10 pt au-dessus et 6 pt au-dessous du trait. Les vrais segments à mesurer
+    ont leur texte le plus proche à ≥ 14 pt : aucun faux positif."""
     if t.height > t.width:
         return False
     cover = 0.0
     for w in words:
         x0, y0, x1, y1 = w[:4]
-        if y1 <= t.y0 + 2 and t.y0 - y1 < 10:
+        if y1 <= t.y0 + 6 and t.y0 - y1 < 10:
             ov = min(x1, t.x1) - max(x0, t.x0)
             if ov > 0:
                 cover += ov
@@ -238,7 +246,15 @@ def parse_pdf(content: bytes, filename: str):
         page_area = pw * ph
 
         solids, thins = _collect_page_regions(page)
-        regions = solids + thins
+
+        # v2.4 — les lignes fines ne sont JAMAIS clusterisées : une ligne qui a
+        # survécu aux filtres anti-bruit est un segment autonome à mesurer.
+        # L'incohérence v2.3 (isolation exigée à ±3 pt, clustering à ±14 pt)
+        # faisait fusionner les segments avec une illustration voisine : sur la
+        # page « Mesure de segments » de la série 6P, les segments a, c et f
+        # disparaissaient dans un blob de 172×67 mm et seuls b et e partaient
+        # comme lignes — d'où l'association impossible côté modèle (essai 35).
+        regions = solids
 
         # Clustering : tracés voisins = une figure
         clusters = _cluster_rects(regions)
@@ -261,6 +277,9 @@ def parse_pdf(content: bytes, filename: str):
                     final.extend(r for r in solids
                                  if r.intersects(s) and r.width >= 24 and r.height >= 24)
 
+        # v2.4 — chaque ligne fine part individuellement
+        final.extend(thins)
+
         # Filtres finaux : figures pleines OU lignes fines assez longues
         keep, seen = [], set()
         for r in final:
@@ -281,17 +300,35 @@ def parse_pdf(content: bytes, filename: str):
         keep.sort(key=lambda r: (round(r.y0 / 24), r.x0))
 
         # Rasterisation 2x de chaque zone
+        page_words = page.get_text("words")
         for r in keep:
             try:
                 # Lignes fines : dilater le clip pour que le trait soit
                 # visible ; w_mm/h_mm décrivent le CLIP rasterisé, donc
                 # l'échelle réelle reste exacte à l'impression.
                 clip = fitz.Rect(r)
+                is_thin = min(r.width, r.height) < 24
                 if r.height < 24 and r.width >= r.height:
                     clip = fitz.Rect(r.x0 - 3, r.y0 - 6, r.x1 + 3, r.y1 + 6)
                 elif r.width < 24:
                     clip = fitz.Rect(r.x0 - 6, r.y0 - 3, r.x1 + 6, r.y1 + 3)
                 clip = clip & page.rect
+                # v2.4 — GARDE FINALE : un clip de ligne fine qui contient du
+                # texte n'est PAS un segment à mesurer (soulignement de titre,
+                # ligne collée à un libellé) → on ne le transmet pas, quel que
+                # soit le verdict des filtres géométriques en amont. Seules les
+                # LETTRES comptent : les chiffres d'une ligne graduée restent
+                # légitimes.
+                if is_thin:
+                    letters = 0
+                    for w in page_words:
+                        wr = fitz.Rect(w[:4])
+                        inter = wr & clip
+                        if not inter.is_empty and wr.get_area() > 0 \
+                                and inter.get_area() > 0.3 * wr.get_area():
+                            letters += sum(1 for ch in w[4] if ch.isalpha())
+                    if letters >= 3:
+                        continue
                 pix = page.get_pixmap(clip=clip, matrix=fitz.Matrix(2, 2))
                 if pix.width < 8 or pix.height < 8:
                     continue
@@ -934,7 +971,7 @@ async def convert_pdf(file: UploadFile = File(...)):
 # ─────────────────────────────────────────────
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "2.3"}
+    return {"status": "ok", "version": "2.4"}
 
 
 if __name__ == "__main__":
