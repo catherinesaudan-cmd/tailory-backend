@@ -1,8 +1,11 @@
 """
-Tailory Backend V2.9.1 — Pipeline documentaire pédagogique
-FastAPI + python-docx + pdf2docx + Anthropic proxy
+Tailory Backend V2.9.2 — Pipeline documentaire pédagogique
+FastAPI + python-docx + pdf2docx + Anthropic proxy + pictogrammes ARASAAC
 
 Endpoints:
+  POST /pictos   → résolution de mots-clés en pictogrammes ARASAAC (base64)
+                   (chantier prioritaire validé : supports visuels du mode
+                    Participation — non-lecteur, non-verbal/CAA, allophone)
   POST /parse    → DOCX/PDF/ODT → structure JSON pédagogique
                    (ODT : converti en PDF via LibreOffice puis pipeline PDF —
                     indispensable car les ODT contiennent souvent des formes
@@ -11,6 +14,24 @@ Endpoints:
   POST /export   → structure JSON adaptée → DOCX
   POST /convert  → PDF → DOCX (existant, conservé)
   GET  /health   → vérification
+
+V2.9.2 (chantier ARASAAC seul — périmètre validé par Catherine) :
+  · POST /pictos : {"mots": ["araignée", …], "lang": "fr"} → pour chaque mot,
+    le meilleur pictogramme ARASAAC en data-URL PNG 300 px, prêt à injecter
+    dans le HTML (l'export reste autonome, aucune dépendance réseau à
+    l'impression). Recherche via bestsearch avec repli search ; normalisation
+    des mots (minuscules, déterminants élidés « l'araignée » → « araignée ») ;
+    langues fr/de/en… (code ARASAAC).
+  · CACHE deux niveaux, zéro dépendance nouvelle (urllib stdlib) :
+    mémoire (mot→id, id→png) + disque (ARASAAC_CACHE_DIR, défaut
+    /tmp/arasaac_cache — les pictos sont immuables). Un mot introuvable est
+    aussi mis en cache (négatif, TTL session) pour ne pas re-frapper l'API.
+  · Limites de sécurité : 24 mots max par requête, timeout 8 s par appel
+    ARASAAC, mots introuvables → null (le frontend applique ses replis
+    émoji/sans-image). Meta d'attribution CC BY-NC-SA incluse dans chaque
+    réponse (obligation de licence — ligne à imprimer en pied de fiche).
+  · /health expose arasaac:"ok"/"unreachable" (sonde légère, 1 requête test
+    mise en cache) pour vérifier l'accès réseau depuis Render au déploiement.
 
 V2.9.1 (retour essai 44 — régression Pacôme corrigée) :
   · COMPOSITES = SCÈNES SEULEMENT : la garde par paires de la V2.9 laissait
@@ -1015,6 +1036,122 @@ async def parse_document(file: UploadFile = File(...)):
 # ENDPOINT : /generate
 # Proxy Anthropic avec retry + chunking
 # ─────────────────────────────────────────────
+# ─────────────────────────────────────────────
+# ENDPOINT : /pictos  (V2.9.2 — ARASAAC)
+# Mots-clés → pictogrammes ARASAAC en data-URL
+# ─────────────────────────────────────────────
+import urllib.request
+import urllib.parse
+import unicodedata
+
+ARASAAC_API = "https://api.arasaac.org/v1/pictograms"
+ARASAAC_STATIC = "https://static.arasaac.org/pictograms/{id}/{id}_300.png"
+ARASAAC_CACHE_DIR = os.environ.get("ARASAAC_CACHE_DIR", os.path.join(tempfile.gettempdir(), "arasaac_cache"))
+ARASAAC_TIMEOUT = 8
+ARASAAC_MAX_MOTS = 24
+ARASAAC_ATTRIBUTION = ("Pictogrammes : ARASAAC (arasaac.org) — auteur Sergio Palao, "
+                       "propriété du Gouvernement d'Aragon, licence CC BY-NC-SA")
+
+_arasaac_ids: dict = {}      # "fr:araignée" -> id ARASAAC (ou -1 = introuvable, cache négatif)
+_arasaac_png: dict = {}      # id -> bytes PNG
+
+_ARASAAC_DETS = ("l'", "d'", "le ", "la ", "les ", "un ", "une ", "des ", "du ", "de ")
+
+def _arasaac_norm(mot: str) -> str:
+    """Normalise un mot-clé : minuscules, espaces réduits, déterminant élidé."""
+    m = (mot or "").strip().lower()
+    m = re.sub(r"\s+", " ", m)
+    for det in _ARASAAC_DETS:
+        if m.startswith(det):
+            m = m[len(det):]
+            break
+    return m.strip()
+
+def _arasaac_http_json(url: str):
+    req = urllib.request.Request(url, headers={"User-Agent": "Tailory/2.9.2"})
+    with urllib.request.urlopen(req, timeout=ARASAAC_TIMEOUT) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+def _arasaac_http_bytes(url: str) -> bytes:
+    req = urllib.request.Request(url, headers={"User-Agent": "Tailory/2.9.2"})
+    with urllib.request.urlopen(req, timeout=ARASAAC_TIMEOUT) as r:
+        return r.read()
+
+def _arasaac_search_id(mot: str, lang: str):
+    """bestsearch puis repli search ; retourne l'id du 1er pictogramme ou None."""
+    q = urllib.parse.quote(mot)
+    for route in ("bestsearch", "search"):
+        try:
+            data = _arasaac_http_json(f"{ARASAAC_API}/{lang}/{route}/{q}")
+            if isinstance(data, list) and data and isinstance(data[0], dict) and "_id" in data[0]:
+                return int(data[0]["_id"])
+        except Exception:
+            continue
+    return None
+
+def _arasaac_png_by_id(pid: int):
+    """PNG 300 px d'un picto — cache mémoire puis disque puis réseau."""
+    if pid in _arasaac_png:
+        return _arasaac_png[pid]
+    os.makedirs(ARASAAC_CACHE_DIR, exist_ok=True)
+    fp = os.path.join(ARASAAC_CACHE_DIR, f"{pid}_300.png")
+    if os.path.exists(fp):
+        with open(fp, "rb") as f:
+            b = f.read()
+        _arasaac_png[pid] = b
+        return b
+    try:
+        b = _arasaac_http_bytes(ARASAAC_STATIC.format(id=pid))
+    except Exception:
+        return None
+    if not b or len(b) < 100:
+        return None
+    with open(fp, "wb") as f:
+        f.write(b)
+    _arasaac_png[pid] = b
+    return b
+
+def _arasaac_resolve(mot: str, lang: str):
+    """Mot → {id, dataurl} ou None. Caches négatifs inclus."""
+    key = f"{lang}:{mot}"
+    pid = _arasaac_ids.get(key)
+    if pid == -1:
+        return None
+    if pid is None:
+        pid = _arasaac_search_id(mot, lang)
+        _arasaac_ids[key] = pid if pid is not None else -1
+        if pid is None:
+            return None
+    b = _arasaac_png_by_id(pid)
+    if b is None:
+        return None
+    return {"id": pid, "dataurl": "data:image/png;base64," + base64.b64encode(b).decode("ascii")}
+
+@app.post("/pictos")
+async def pictos(request: Request):
+    """
+    {"mots": ["araignée", "l'insecte", …], "lang": "fr"}
+    → {"pictos": {"araignée": {"id":…, "dataurl":"data:image/png;base64,…"} | null, …},
+       "attribution": "…CC BY-NC-SA…", "lang": "fr"}
+    Un mot introuvable vaut null : le frontend applique ses replis (émoji, sans image).
+    """
+    body = await request.json()
+    mots = body.get("mots") or []
+    lang = (body.get("lang") or "fr").strip().lower()[:2]
+    if not isinstance(mots, list) or not mots:
+        raise HTTPException(400, "mots (liste non vide) requis")
+    if len(mots) > ARASAAC_MAX_MOTS:
+        raise HTTPException(400, f"maximum {ARASAAC_MAX_MOTS} mots par requête")
+    out = {}
+    for mot_brut in mots:
+        mot = _arasaac_norm(str(mot_brut))
+        if not mot:
+            out[str(mot_brut)] = None
+            continue
+        out[str(mot_brut)] = _arasaac_resolve(mot, lang)
+    return {"pictos": out, "attribution": ARASAAC_ATTRIBUTION, "lang": lang}
+
+
 @app.post("/generate")
 async def generate(request: Request):
     """
@@ -1278,9 +1415,21 @@ async def convert_pdf(file: UploadFile = File(...)):
 # ─────────────────────────────────────────────
 # ENDPOINT : /health
 # ─────────────────────────────────────────────
+_arasaac_probe_cache = {"t": 0.0, "state": "unknown"}
+
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "2.9.1"}
+    # V2.9.2 — sonde ARASAAC (mise en cache 10 min : /health est appelé à chaque
+    # chargement du frontend, on ne frappe pas l'API à chaque fois)
+    now = time.time()
+    if now - _arasaac_probe_cache["t"] > 600:
+        try:
+            data = _arasaac_http_json(f"{ARASAAC_API}/fr/bestsearch/maison")
+            _arasaac_probe_cache["state"] = "ok" if isinstance(data, list) and data else "empty"
+        except Exception:
+            _arasaac_probe_cache["state"] = "unreachable"
+        _arasaac_probe_cache["t"] = now
+    return {"status": "ok", "version": "2.9.2", "arasaac": _arasaac_probe_cache["state"]}
 
 
 if __name__ == "__main__":
