@@ -1,5 +1,5 @@
 """
-Tailory Backend V2.9.2 — Pipeline documentaire pédagogique
+Tailory Backend V2.9.3 — Pipeline documentaire pédagogique
 FastAPI + python-docx + pdf2docx + Anthropic proxy + pictogrammes ARASAAC
 
 Endpoints:
@@ -14,6 +14,13 @@ Endpoints:
   POST /export   → structure JSON adaptée → DOCX
   POST /convert  → PDF → DOCX (existant, conservé)
   GET  /health   → vérification
+
+V2.9.3 (expérience du mode dégradé, 26 juillet 2026) :
+  · PDF_B64_MAX : le plafond d'attachement du PDF converti (ODT) passe de
+    150 000 à 4 000 000 caractères base64. Il doublait en silence le plafond
+    du frontend : remonter celui du frontend seul ne changeait rien, le PDF
+    ne quittait jamais le backend. Quand le plafond est dépassé, la réponse
+    porte désormais « pdf_b64_skipped_bytes » — plus de rejet muet.
 
 V2.9.2 (chantier ARASAAC seul — périmètre validé par Catherine) :
   · POST /pictos : {"mots": ["araignée", …], "lang": "fr"} → pour chaque mot,
@@ -155,6 +162,11 @@ from docx.oxml import OxmlElement
 
 # pdf2docx (conversion PDF→DOCX existante)
 from pdf2docx import Converter
+
+# V2.9.3 — plafond d'attachement du PDF converti, en caractères base64.
+# Doit rester égal à PDF_B64_MAX du frontend (tailoryv10_62.html) : un plafond
+# plus bas ici filtrerait en amont, invisiblement, quoi que fasse le frontend.
+PDF_B64_MAX = 4_000_000  # ~3 Mo de PDF, une trentaine de pages illustrées
 
 app = FastAPI(title="Tailory Backend V2")
 
@@ -840,10 +852,18 @@ async def parse_document(file: UploadFile = File(...)):
                      "Exportez le document en PDF depuis LibreOffice et réessayez.")
         result = parse_pdf(pdf_bytes, filename)
         result["source_format"] = "odt"
-        # Joindre le PDF converti si assez petit pour être transmis à l'IA
-        # comme document natif (limite frontend : 150 000 caractères base64).
-        if len(pdf_bytes) * 4 / 3 < 150_000:
+        # Joindre le PDF converti pour qu'il soit transmis à l'IA comme document
+        # natif. V2.9.3 : le plafond passe de 150 000 à 4 000 000 caractères
+        # base64 (~3 Mo de PDF), aligné sur PDF_B64_MAX du frontend v10.62.
+        # L'ancienne valeur écartait SILENCIEUSEMENT les documents illustrés
+        # (EvalSerie1maths6P : 1 474 ko, 1 341 % du plafond) : le modèle ne
+        # recevait alors que le texte et les miniatures, sans jamais voir la page.
+        # Les deux plafonds doivent rester égaux : c'est le frontend qui décide,
+        # le backend ne doit plus filtrer en amont sans le dire.
+        if len(pdf_bytes) * 4 / 3 < PDF_B64_MAX:
             result["pdf_b64"] = base64.b64encode(pdf_bytes).decode()
+        else:
+            result["pdf_b64_skipped_bytes"] = len(pdf_bytes)
         return result
 
     # PDF : extraction directe PyMuPDF (images raster + figures vectorielles)
@@ -1429,7 +1449,7 @@ def health():
         except Exception:
             _arasaac_probe_cache["state"] = "unreachable"
         _arasaac_probe_cache["t"] = now
-    return {"status": "ok", "version": "2.9.2", "arasaac": _arasaac_probe_cache["state"]}
+    return {"status": "ok", "version": "2.9.3", "arasaac": _arasaac_probe_cache["state"]}
 
 
 if __name__ == "__main__":
