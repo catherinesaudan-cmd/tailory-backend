@@ -1,5 +1,5 @@
 """
-Tailory Backend V2.9.3 — Pipeline documentaire pédagogique
+Tailory Backend V2.10 — Pipeline documentaire pédagogique
 FastAPI + python-docx + pdf2docx + Anthropic proxy + pictogrammes ARASAAC
 
 Endpoints:
@@ -14,6 +14,26 @@ Endpoints:
   POST /export   → structure JSON adaptée → DOCX
   POST /convert  → PDF → DOCX (existant, conservé)
   GET  /health   → vérification
+
+V2.10 (grilles et formes composites, 27 juillet 2026) :
+  · Les quadrillages et les tableaux d'une source ne partent plus en miettes.
+    Trois symptômes réparés, tous mesurés sur un cas d'essai fabriqué :
+      - un quadrillage vide disparaissait entièrement (ses traits réguliers
+        étaient éliminés comme du bruit) : le modèle recevait des taches
+        coloriées sans repère pour compter, d'où les aires inventées ;
+      - un tableau ressortait en file de mots, sans plus dire quelle valeur
+        allait avec quelle entrée (« 36 / 24 / 1 2 3 … 12 ») ;
+      - ce même tableau repartait AUSSI en figure découpée : vu deux fois,
+        une fois juste et une fois faux.
+    Le serveur ne résout rien : il mesure et il le dit. Une grille produit sa
+    forme (« quadrillage 8 colonnes x 6 lignes, case 10,0 mm »), son contenu
+    si elle porte du texte, et le nombre de cases pleines de chaque figure —
+    ce dernier UNIQUEMENT si les figures épousent la grille. Une forme
+    oblique, un triangle, un décalage : rien n'est annoncé, et la raison du
+    silence est transmise. Un comptage douteux est plus dangereux qu'absent.
+    Module `grilles.py`, batterie `test_grilles_v210.py` (21 cas, à vide).
+    Si le module est absent au déploiement, le pipeline retombe à l'identique
+    sur le comportement 2.9.3 — aucune panne, seulement l'ancien défaut.
 
 V2.9.3 (expérience du mode dégradé, 26 juillet 2026) :
   · PDF_B64_MAX : le plafond d'attachement du PDF converti (ODT) passe de
@@ -549,6 +569,27 @@ def _collect_page_regions(page):
     return solids, thins, rasters
 
 
+# ─────────────────────────────────────────────
+# V2.10 — grilles et formes composites
+# Import tolérant : si le module n'a pas été déployé à côté de app.py, le
+# pipeline garde exactement son comportement 2.9.3. Pas de panne, pas de
+# demi-mesure silencieuse : l'état est visible sur /health.
+# ─────────────────────────────────────────────
+try:
+    import grilles as _grilles
+    GRILLES_ACTIVES = True
+except Exception:  # module absent ou illisible
+    _grilles = None
+    GRILLES_ACTIVES = False
+
+try:
+    import formes as _formes
+    FORMES_ACTIVES = True
+except Exception:
+    _formes = None
+    FORMES_ACTIVES = False
+
+
 def parse_pdf(content: bytes, filename: str):
     """
     Extrait d'un PDF, dans l'ordre de lecture :
@@ -563,6 +604,8 @@ def parse_pdf(content: bytes, filename: str):
     doc = fitz.open(stream=content, filetype="pdf")
     images = []
     full_text = []
+    grilles_inventaire = []
+    formes_inventaire = []
     idx = 0
 
     for pno, page in enumerate(doc):
@@ -570,6 +613,37 @@ def parse_pdf(content: bytes, filename: str):
         page_area = pw * ph
 
         solids, thins, rasters = _collect_page_regions(page)
+
+        # V2.10 — grilles de la page : forme, contenu, comptage des cases.
+        # `zones_grilles` liste les tableaux de texte, qui ne doivent plus
+        # repartir en figure découpée : leur contenu est déjà transmis en
+        # clair, et l'image du même tableau faisait doublon.
+        # V2.10 — formes composites : une figure faite de plusieurs
+        # rectangles ne doit plus partir comme un bloc plein. Sa
+        # décomposition est décrite, son aire réelle mesurée.
+        formes_page = []
+        if FORMES_ACTIVES:
+            try:
+                formes_page = _formes.analyser_formes(page)
+            except Exception:
+                formes_page = []
+        blocs_formes = [(f["rect"].y0, f["rect"].x0, _formes.decrire(f))
+                        for f in formes_page]
+
+        grilles_page, zones_grilles = [], []
+        if GRILLES_ACTIVES:
+            try:
+                analyse = _grilles.analyser_page(page)
+                grilles_page = analyse["grilles"]
+                zones_grilles = analyse["zones_grilles"]
+                texte_page = _grilles.texte_avec_grilles(
+                    page, grilles_page, blocs_formes)
+            except Exception:
+                texte_page = page.get_text("text")
+        else:
+            texte_page = page.get_text("text")
+            if blocs_formes:
+                texte_page += "\n" + "\n".join(b[2] for b in sorted(blocs_formes))
 
         # v2.5 — les lignes fines ne partent que si la page parle de mesure ou
         # de tracé : sur une fiche de français, les lignes de réponse aux
@@ -637,7 +711,39 @@ def parse_pdf(content: bytes, filename: str):
                 continue
             if (r.width * r.height) > 0.85 * page_area:
                 continue
+            # V2.10 — un tableau de texte n'est pas une figure : son contenu
+            # part déjà en clair, l'image ferait doublon. MAIS beaucoup de
+            # sources se servent d'un tableau comme d'une mise en page et y
+            # posent leurs dessins : une figure logée dans une cellule reste
+            # une figure, et perdre un dessin est une faute grave.
+            dans_tableau = any(not (r & z).is_empty
+                               and (r & z).get_area() >= 0.6 * r.get_area()
+                               for z in zones_grilles)
+            if dans_tableau and not any(
+                    not (r & ra).is_empty
+                    and (r & ra).get_area() >= 0.5 * min(r.get_area(),
+                                                         ra.get_area())
+                    for ra in rasters):
+                continue
             keep.append(r)
+
+        # V2.10 — le quadrillage part d'un seul tenant. Jusqu'ici ses traits
+        # réguliers étaient éliminés comme du bruit et seules les zones
+        # coloriées survivaient : le modèle recevait des taches sans repère,
+        # et l'élève une figure sans quadrillage à compter. On ajoute donc le
+        # cadre complet, et on retire les morceaux qu'il contient — ils y sont
+        # déjà, en place.
+        for g in grilles_page:
+            if g["nature"] != "quadrillage":
+                continue
+            cadre = fitz.Rect(g["rect"]) & page.rect
+            if cadre.is_empty or cadre.width < 24 or cadre.height < 24:
+                continue
+            keep = [r for r in keep
+                    if not (cadre.contains(r)
+                            or (not (r & cadre).is_empty
+                                and (r & cadre).get_area() >= 0.6 * r.get_area()))]
+            keep.append(cadre)
 
         # Ordre de lecture : haut → bas, gauche → droite
         keep.sort(key=lambda r: (round(r.y0 / 24), r.x0))
@@ -692,7 +798,30 @@ def parse_pdf(content: bytes, filename: str):
             except Exception:
                 pass
 
-        full_text.append(page.get_text("text"))
+        for g in grilles_page:
+            grilles_inventaire.append({
+                "page": pno + 1,
+                "nature": g["nature"],
+                "lignes": g["lignes"],
+                "colonnes": g["colonnes"],
+                "case_l_mm": g["case_l_mm"],
+                "case_h_mm": g["case_h_mm"],
+                "zones": [{"etiquette": z["etiquette"], "cases": z["cases"],
+                           "composite": z["composite"]} for z in g["zones"]],
+                "comptage_refuse": g["comptage_refuse"],
+            })
+
+        for f in formes_page:
+            formes_inventaire.append({
+                "page": pno + 1,
+                "etiquette": f["etiquette"],
+                "membres": f["membres"],
+                "encombrement_mm2": f["encombrement_mm2"],
+                "aire_mm2": f["aire_mm2"],
+                "aire_refusee": f["aire_refusee"],
+            })
+
+        full_text.append(texte_page)
 
     doc.close()
     return {
@@ -703,6 +832,14 @@ def parse_pdf(content: bytes, filename: str):
         "images": images,
         "text": "\n".join(full_text),
         "exercises": [],
+        # V2.10 — inventaire des grilles rencontrées, pour le journal et pour
+        # le vérificateur : nature, dimensions, cases comptées ou refus motivé.
+        "grilles": grilles_inventaire,
+        "grilles_actives": GRILLES_ACTIVES,
+        # Idem pour les formes composites : membres, encombrement, aire
+        # réelle ou refus motivé.
+        "formes": formes_inventaire,
+        "formes_actives": FORMES_ACTIVES,
     }
 
 # ─────────────────────────────────────────────
@@ -1449,7 +1586,15 @@ def health():
         except Exception:
             _arasaac_probe_cache["state"] = "unreachable"
         _arasaac_probe_cache["t"] = now
-    return {"status": "ok", "version": "2.9.3", "arasaac": _arasaac_probe_cache["state"]}
+    # V2.10 — la version du module grilles est remontée telle qu'elle est
+    # DANS le fichier déployé, jamais recopiée à la main : c'est ce qui
+    # permet de savoir, en ligne, laquelle tourne vraiment.
+    return {"status": "ok", "version": "2.10",
+            "grilles": (getattr(_grilles, "VERSION", "inconnue")
+                        if GRILLES_ACTIVES else "absent"),
+            "formes": (getattr(_formes, "VERSION", "inconnue")
+                       if FORMES_ACTIVES else "absent"),
+            "arasaac": _arasaac_probe_cache["state"]}
 
 
 if __name__ == "__main__":
