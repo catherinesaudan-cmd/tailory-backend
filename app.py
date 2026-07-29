@@ -1,5 +1,5 @@
 """
-Tailory Backend V2.10 — Pipeline documentaire pédagogique
+Tailory Backend V2.11 — Pipeline documentaire pédagogique
 FastAPI + python-docx + pdf2docx + Anthropic proxy + pictogrammes ARASAAC
 
 Endpoints:
@@ -14,6 +14,26 @@ Endpoints:
   POST /export   → structure JSON adaptée → DOCX
   POST /convert  → PDF → DOCX (existant, conservé)
   GET  /health   → vérification
+
+V2.11 (chantier 6.8 — segments courts étiquetés, 31 juillet 2026) :
+  · Un trait fin de 7 à 14 mm devient une figure candidate s'il porte une
+    ÉTIQUETTE DE SÉRIE juste à sa gauche — une lettre ou un chiffre seul
+    suivi d'une parenthèse ou d'un point : a) b) e) 1) 2. — ET qu'un autre
+    trait étiqueté de longueur différente (> 5 %) existe sur la même page.
+    Mesuré sur essai_10117 : le segment e) fait 8,0 mm dans la source,
+    sous le plancher de 14,1 mm (40 pt) qui écarte tirets, puces et
+    soulignements ; dans un exercice de MESURE, un trait court qui porte
+    sa lettre est une vraie figure, pas un parasite.
+  · Ce qui reste dehors, et pourquoi : les tirets et puces (jamais
+    étiquetés) ; les lignes de réponse d'une liste numérotée « 1) ___ »
+    (étiquetées mais TOUTES de la même longueur — les segments d'un
+    exercice de mesure ont des longueurs toutes différentes, c'est le
+    principe de l'exercice) ; un trait court étiqueté isolé sans compagnon
+    (le plancher de 14,1 mm garde le dernier mot) ; l'étiquette au-dessus
+    du trait (trop proche d'un mot souligné ou d'un numérateur — porte
+    fermée pour cette version). Les promus subissent ensuite les mêmes
+    filtres anti-bruit que les longs (isolement, souligné, familles) et le
+    filtre v2.5 des pages de mesure.
 
 V2.10 (grilles et formes composites, 27 juillet 2026) :
   · Les quadrillages et les tableaux d'une source ne partent plus en miettes.
@@ -467,11 +487,47 @@ def _is_underline_of_text(words, t):
     return cover >= 0.6 * t.width
 
 
+# V2.11 (chantier 6.8) — plancher des segments courts étiquetés : 7,0 mm.
+# En dessous, rien ne passe, étiquette ou pas ; entre 7 et 14 mm, seulement
+# sous les deux conditions du bloc 2c ; à partir de 14,1 mm (40 pt), régime
+# inchangé.
+SEUIL_COURT_ETIQUETE = 19.8  # 7,0 mm en points PDF
+
+_ETIQUETTE_SERIE = re.compile(r"^([A-Za-z]|\d{1,2})[).]$")
+
+
+def _etiquette_de_serie(words, t):
+    """V2.11 (chantier 6.8) — vrai si un mot-étiquette de série (lettre ou
+    chiffre seul suivi d'une parenthèse ou d'un point : a) b) e) 1) 2.) se
+    tient JUSTE À GAUCHE du trait. C'est la signature d'un segment d'exercice
+    de mesure ; un tiret, une puce ou un soulignement n'est jamais étiqueté.
+    À gauche seulement — une étiquette au-dessus ressemble trop à un mot
+    souligné ou à un numérateur de fraction : cette porte reste fermée."""
+    for w in words:
+        if not _ETIQUETTE_SERIE.match(w[4].strip()):
+            continue
+        wx0, wy0, wx1, wy1 = w[:4]
+        # à gauche : le mot finit avant le trait (chevauchement de 2 pt
+        # toléré), à moins de 12 pt (~4 mm) de son départ
+        if not (wx1 <= t.x0 + 2 and t.x0 - wx1 <= 12):
+            continue
+        if t.width >= t.height:      # trait horizontal : son axe traverse le mot
+            cy = (t.y0 + t.y1) / 2
+            if wy0 - 3 <= cy <= wy1 + 3:
+                return True
+        else:                        # trait vertical : le mot à hauteur du trait
+            cy = (wy0 + wy1) / 2
+            if t.y0 - 3 <= cy <= t.y1 + 3:
+                return True
+    return False
+
+
 def _collect_page_regions(page):
     """
     Régions candidates d'une page, en deux familles :
     - solids : images raster + tracés vectoriels « pleins »
     - thins  : lignes fines légitimes (segments à mesurer, lignes graduées)
+      V2.11 : + segments courts (7–14 mm) étiquetés en série, bloc 2c
     Filtres : fonds de page (> 85 % de l'aire), séparateurs pleine largeur,
     micro-tracés, soulignés de texte, bordures de tableaux (non isolées),
     familles de lignes identiques (lignes d'écriture, grilles).
@@ -480,6 +536,7 @@ def _collect_page_regions(page):
     pw, ph = page.rect.width, page.rect.height
     page_area = pw * ph
     solids, thins = [], []
+    courts = []  # V2.11 — candidats 7-14 mm, promus au bloc 2c ou jetés
     rasters = []  # v2.8 — les rasters ne passent PAS par le clustering
 
     # 1. Images raster — v2.8 : chaque raster est une figure autonome.
@@ -521,10 +578,16 @@ def _collect_page_regions(page):
             if r.width < 10 and r.height < 10:
                 continue  # micro-tracé
             if r.width < 10 or r.height < 10:
-                # Ligne fine : candidate seulement si assez longue pour être
-                # une figure (segment, ligne graduée), pas un simple tiret
+                # Ligne fine : candidate d'office si assez longue pour être
+                # une figure (segment, ligne graduée), pas un simple tiret.
+                # V2.11 (chantier 6.8) — entre 7 et 14 mm, candidate SOUS
+                # CONDITIONS, vérifiées au bloc 2c : un segment court qui
+                # porte sa lettre dans un exercice de mesure est une vraie
+                # figure (segment e de 8 mm, essai_10117).
                 if max(r.width, r.height) >= 40:
                     thins.append(fitz.Rect(r))
+                elif max(r.width, r.height) >= SEUIL_COURT_ETIQUETE:
+                    courts.append(fitz.Rect(r))
                 continue
             solids.append(fitz.Rect(r))
     except Exception:
@@ -541,6 +604,29 @@ def _collect_page_regions(page):
     # en amont pour ne pas générer deux figures du même contenu.
     solids = [r for r in solids
               if not any(ra.contains(r) for ra in rasters)]
+
+    # 2c. V2.11 (chantier 6.8) — promotion des segments courts étiquetés.
+    # Un trait de 7 à 14 mm n'entre qu'à deux conditions cumulées :
+    #   1. une étiquette de série juste à sa gauche (a), e), 1), 2. …) ;
+    #   2. un AUTRE trait étiqueté de longueur différente (> 5 %) sur la
+    #      page — les segments d'un exercice de mesure ont des longueurs
+    #      toutes différentes, c'est le principe de l'exercice ; les lignes
+    #      de réponse d'une liste numérotée font toutes la même : dehors.
+    # Les promus subissent ensuite les mêmes filtres anti-bruit que les
+    # longs (isolement, souligné, familles) puis le filtre v2.5 des pages
+    # de mesure — la porte ne s'ouvre que d'un cran, pas en grand.
+    if courts:
+        candidats = [t for t in courts
+                     if _etiquette_de_serie(words_v27, t)]
+        if candidats:
+            longueurs = [max(t.width, t.height)
+                         for t in list(thins) + candidats
+                         if _etiquette_de_serie(words_v27, t)]
+            for t in candidats:
+                L = max(t.width, t.height)
+                if any(abs(L - L2) > 0.05 * max(L, L2)
+                       for L2 in longueurs):
+                    thins.append(t)
 
     # 3. Anti-bruit lignes fines
     if thins:
@@ -698,6 +784,15 @@ def parse_pdf(content: bytes, filename: str):
         final.extend(rasters)
 
         # Filtres finaux : figures pleines OU lignes fines assez longues
+        # V2.11 — les segments courts étiquetés, promus au bloc 2c, passent
+        # au même titre que les longs : la porte ne s'ouvre que pour EUX,
+        # le plancher des 14 mm reste la règle pour tout le reste.
+        cles_courts = set()
+        for t in thins:
+            if max(t.width, t.height) < 40:
+                tt = t & page.rect
+                cles_courts.add((round(tt.x0), round(tt.y0),
+                                 round(tt.x1), round(tt.y1)))
         keep, seen = [], set()
         for r in final:
             r = r & page.rect
@@ -706,7 +801,8 @@ def parse_pdf(content: bytes, filename: str):
                 continue
             seen.add(key)
             full = r.width >= 24 and r.height >= 24
-            slim = min(r.width, r.height) < 24 and max(r.width, r.height) >= 40
+            slim = min(r.width, r.height) < 24 and (
+                max(r.width, r.height) >= 40 or key in cles_courts)
             if not (full or slim):
                 continue
             if (r.width * r.height) > 0.85 * page_area:
@@ -1589,7 +1685,7 @@ def health():
     # V2.10 — la version du module grilles est remontée telle qu'elle est
     # DANS le fichier déployé, jamais recopiée à la main : c'est ce qui
     # permet de savoir, en ligne, laquelle tourne vraiment.
-    return {"status": "ok", "version": "2.10",
+    return {"status": "ok", "version": "2.11",
             "grilles": (getattr(_grilles, "VERSION", "inconnue")
                         if GRILLES_ACTIVES else "absent"),
             "formes": (getattr(_formes, "VERSION", "inconnue")
