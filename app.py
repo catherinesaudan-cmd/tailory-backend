@@ -1,5 +1,5 @@
 """
-Tailory Backend V2.11 — Pipeline documentaire pédagogique
+Tailory Backend V2.12 — Pipeline documentaire pédagogique
 FastAPI + python-docx + pdf2docx + Anthropic proxy + pictogrammes ARASAAC
 
 Endpoints:
@@ -493,7 +493,33 @@ def _is_underline_of_text(words, t):
 # inchangé.
 SEUIL_COURT_ETIQUETE = 19.8  # 7,0 mm en points PDF
 
-_ETIQUETTE_SERIE = re.compile(r"^([A-Za-z]|\d{1,2})[).]$")
+# V2.12 (chantier 4 — tirage essai_10127) — DISTANCE LETTRE → TRAIT.
+# La V2.11 exigeait l'étiquette à moins de 12 pt (4 mm) du départ du trait.
+# Mesuré le 29.07.2026 sur la page de mesure réellement utilisée (évaluation 3,
+# « Partie 2 Géométrie », six segments a) à f) alignés sur des tabulations) :
+#
+#     d)  85,0 mm   →   7,6 pt      (seul à passer la porte de 12 pt)
+#     f) 114,0 mm   →  16,6 pt
+#     b) 110,0 mm   →  26,1 pt
+#     c)  30,0 mm   →  27,1 pt
+#     e)   8,0 mm   →  45,4 pt      ← le seul qui AVAIT BESOIN de la porte
+#
+# Les quatre longs entraient sans elle (≥ 40 pt). Le court, lui, était rejeté
+# pour 33 pt de tabulation. La porte était calibrée sur une hypothèse, pas sur
+# une mesure. Elle passe à 60 pt (21 mm), ce qui couvre une tabulation avec de
+# la marge.
+#
+# CE QUI REMPLACE LA DISTANCE COMME GARDE-FOU. Élargir seul rouvrirait la porte
+# aux soulignements. Deux conditions la referment :
+#   — RIEN ENTRE LES DEUX (ci-dessous) : aucun mot ne s'intercale entre
+#     l'étiquette et le départ du trait. Un mot souligné a son texte AU-DESSUS
+#     du trait, pas une lettre isolée à sa gauche avec du vide entre les deux ;
+#   — la condition de série du bloc 2c, inchangée : il faut un autre trait
+#     étiqueté de longueur différente sur la page.
+TOL_ETIQUETTE_PT = 60.0
+
+_ETIQUETTE_SERIE = re.compile(r"^([A-Za-z]|\d{1,2})\s*[).]$")
+_LETTRE_SEULE = re.compile(r"^([A-Za-z]|\d{1,2})$")
 
 
 def _etiquette_de_serie(words, t):
@@ -503,13 +529,40 @@ def _etiquette_de_serie(words, t):
     de mesure ; un tiret, une puce ou un soulignement n'est jamais étiqueté.
     À gauche seulement — une étiquette au-dessus ressemble trop à un mot
     souligné ou à un numérateur de fraction : cette porte reste fermée."""
-    for w in words:
-        if not _ETIQUETTE_SERIE.match(w[4].strip()):
-            continue
+    # V2.12 — une étiquette peut arriver en DEUX mots (« a )» écrit « a » puis
+    # « ) », relevé sur la page de mesure réelle). On recompose avant de juger.
+    etiquettes = []
+    for i, w in enumerate(words):
+        txt = w[4].strip()
+        if _ETIQUETTE_SERIE.match(txt):
+            etiquettes.append(w)
+        elif _LETTRE_SEULE.match(txt) and i + 1 < len(words):
+            nxt = words[i + 1]
+            if nxt[4].strip() in (")", ".") and abs(nxt[1] - w[1]) < 3 \
+               and 0 <= nxt[0] - w[2] <= 6:
+                etiquettes.append((w[0], w[1], nxt[2], nxt[3], txt + nxt[4].strip()))
+
+    for w in etiquettes:
         wx0, wy0, wx1, wy1 = w[:4]
-        # à gauche : le mot finit avant le trait (chevauchement de 2 pt
-        # toléré), à moins de 12 pt (~4 mm) de son départ
-        if not (wx1 <= t.x0 + 2 and t.x0 - wx1 <= 12):
+        # à gauche : le mot finit avant le trait (chevauchement de 2 pt toléré),
+        # à moins de TOL_ETIQUETTE_PT de son départ (V2.12 : 60 pt, mesuré)
+        if not (wx1 <= t.x0 + 2 and t.x0 - wx1 <= TOL_ETIQUETTE_PT):
+            continue
+        # V2.12 — RIEN ENTRE LES DEUX. Ce qui sépare une étiquette de série d'un
+        # mot souligné, ce n'est pas la distance : c'est le vide. Si un mot
+        # s'intercale entre la lettre et le départ du trait, sur la même bande,
+        # ce n'est pas une étiquette de segment.
+        bande0, bande1 = min(wy0, t.y0) - 3, max(wy1, t.y1) + 3
+        intercale = False
+        for autre in words:
+            if autre is w or not autre[4].strip():
+                continue
+            ax0, ay0, ax1, ay1 = autre[:4]
+            if ax0 >= wx1 - 0.5 and ax1 <= t.x0 + 0.5 \
+               and ay1 > bande0 and ay0 < bande1:
+                intercale = True
+                break
+        if intercale:
             continue
         if t.width >= t.height:      # trait horizontal : son axe traverse le mot
             cy = (t.y0 + t.y1) / 2
@@ -1685,7 +1738,7 @@ def health():
     # V2.10 — la version du module grilles est remontée telle qu'elle est
     # DANS le fichier déployé, jamais recopiée à la main : c'est ce qui
     # permet de savoir, en ligne, laquelle tourne vraiment.
-    return {"status": "ok", "version": "2.11",
+    return {"status": "ok", "version": "2.12",
             "grilles": (getattr(_grilles, "VERSION", "inconnue")
                         if GRILLES_ACTIVES else "absent"),
             "formes": (getattr(_formes, "VERSION", "inconnue")
