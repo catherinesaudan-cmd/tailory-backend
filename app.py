@@ -1,5 +1,5 @@
 """
-Tailory Backend V2.12 — Pipeline documentaire pédagogique
+Tailory Backend V2.13 — Pipeline documentaire pédagogique
 FastAPI + python-docx + pdf2docx + Anthropic proxy + pictogrammes ARASAAC
 
 Endpoints:
@@ -1478,30 +1478,76 @@ async def generate(request: Request):
 
     client = anthropic.Anthropic(api_key=api_key)
 
+    # ══ v2.13 — LE CACHE SURVIT À LA DURÉE D'UNE PARTIE ═══════════════════════════════════
+    # Constat des tirages (pied de page essai_10138) : « 10 009 lus + 0 relus +
+    # 160 006 mis en cache » — on PAYE la mise en cache à chaque partie et on ne relit
+    # JAMAIS. Deux causes dans le code v2.12 :
+    #   1. le cache éphémère vit 5 minutes, or l'écriture d'une partie par le modèle en
+    #      prend davantage : à la partie suivante, le cache est déjà mort ;
+    #   2. seul le prompt système portait un repère de cache — le DOCUMENT (le gros du
+    #      volume), envoyé dans le premier message, n'en portait aucun.
+    # Remèdes : durée longue (1 h) demandée sur chaque repère, avec REPLI AUTOMATIQUE en
+    # durée courte si le serveur refuse la syntaxe (aucune génération ne casse, la réponse
+    # dit la durée réellement servie) ; et un repère posé sur le dernier bloc du premier
+    # message utilisateur, là où vit le document. La réponse renvoie désormais TOUS les
+    # compteurs (lus / relus / mis en cache) : la facturation exige des coûts prouvables.
+    for m in messages:
+        if m.get("role") == "user":
+            c = m.get("content")
+            if isinstance(c, str):
+                m["content"] = [{"type": "text", "text": c}]
+            if isinstance(m["content"], list) and m["content"]:
+                dernier = m["content"][-1]
+                if isinstance(dernier, dict) and dernier.get("type") in ("text", "document", "image"):
+                    dernier.setdefault("cache_control", {"type": "ephemeral"})
+            break
+
+    def _pose_ttl(duree):
+        sys_blocs = [{"type": "text", "text": system,
+                      "cache_control": {"type": "ephemeral"}}] if system else []
+        for blocs in ([b for b in sys_blocs],):
+            pass
+        tous = (sys_blocs or []) + [b for m in messages if isinstance(m.get("content"), list)
+                                    for b in m["content"] if isinstance(b, dict) and "cache_control" in b]
+        for b in tous:
+            if duree == "1h":
+                b["cache_control"] = {"type": "ephemeral", "ttl": "1h"}
+            else:
+                b["cache_control"] = {"type": "ephemeral"}
+        return sys_blocs
+
+    # v2.13 — le client peut IMPOSER la durée ("cache_ttl": "5m" ou "1h") : le
+    # frontend sait mieux que le serveur si plusieurs parties sont probables
+    # (taille du document). Valeur absente ou inconnue : durée longue par défaut.
+    duree_cache = body.get("cache_ttl") if body.get("cache_ttl") in ("5m", "1h") else "1h"
+
     # Retry avec backoff exponentiel
     max_retries = 3
     for attempt in range(max_retries):
         try:
+            sys_blocs = _pose_ttl(duree_cache)
+            extra = {"anthropic-beta": "extended-cache-ttl-2025-04-11"} if duree_cache == "1h" else {}
             response = client.messages.create(
                 model=model,
                 max_tokens=max_tokens,
-                system=[{
-                    "type": "text",
-                    "text": system,
-                    "cache_control": {"type": "ephemeral"}
-                }] if system else [],
-                messages=messages
+                system=sys_blocs,
+                messages=messages,
+                extra_headers=extra
             )
             text = "".join(
                 block.text for block in response.content
                 if hasattr(block, "text")
             )
+            u = response.usage
             return {
                 "content": text,
                 "usage": {
-                    "input_tokens": response.usage.input_tokens,
-                    "output_tokens": response.usage.output_tokens
-                }
+                    "input_tokens": u.input_tokens,
+                    "output_tokens": u.output_tokens,
+                    "cache_creation_input_tokens": getattr(u, "cache_creation_input_tokens", 0) or 0,
+                    "cache_read_input_tokens": getattr(u, "cache_read_input_tokens", 0) or 0
+                },
+                "cache_ttl": duree_cache
             }
         except anthropic.RateLimitError as e:
             if attempt < max_retries - 1:
@@ -1510,6 +1556,13 @@ async def generate(request: Request):
                 continue
             raise HTTPException(429, f"Rate limit après {max_retries} tentatives : {e}")
         except anthropic.BadRequestError as e:
+            # v2.13 — repli : si le refus vise la durée du cache (syntaxe ttl ou en-tête
+            # inconnus du serveur), on repart en durée courte, une seule fois, sans
+            # consommer de tentative — la génération ne casse jamais pour du cache.
+            msg = str(e).lower()
+            if duree_cache == "1h" and ("ttl" in msg or "cache" in msg or "beta" in msg):
+                duree_cache = "5m"
+                continue
             raise HTTPException(400, f"Prompt trop long ou invalide : {e}")
         except Exception as e:
             raise HTTPException(500, f"Erreur API : {e}")
@@ -1738,7 +1791,7 @@ def health():
     # V2.10 — la version du module grilles est remontée telle qu'elle est
     # DANS le fichier déployé, jamais recopiée à la main : c'est ce qui
     # permet de savoir, en ligne, laquelle tourne vraiment.
-    return {"status": "ok", "version": "2.12",
+    return {"status": "ok", "version": "2.13",
             "grilles": (getattr(_grilles, "VERSION", "inconnue")
                         if GRILLES_ACTIVES else "absent"),
             "formes": (getattr(_formes, "VERSION", "inconnue")
