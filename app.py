@@ -1,5 +1,5 @@
 """
-Tailory Backend V2.13 — Pipeline documentaire pédagogique
+Tailory Backend V2.14 — Pipeline documentaire pédagogique
 FastAPI + python-docx + pdf2docx + Anthropic proxy + pictogrammes ARASAAC
 
 Endpoints:
@@ -729,6 +729,73 @@ except Exception:
     FORMES_ACTIVES = False
 
 
+# ══ v2.14 — LE GRAS DE LA SOURCE SURVIT À LA LECTURE DU PDF ═══════════════════════════
+# Chantier ouvert le 30.07.2026. La règle de mise en évidence (frontend v10.151) dit que
+# le gras de la source est reproduit par défaut ; mais quand la source arrive en PDF, le
+# serveur lisait `page.get_text("text")`, qui rend une chaîne PLATE : le gras était perdu
+# avant même que le modèle le voie. Aucune règle de conservation ne pouvait donc être
+# tenue sur ce chemin — la perte était silencieuse, le pire cas de la doctrine.
+#
+# Ce que fait la fonction : elle relit la page span par span et entoure les passages en
+# gras de deux marqueurs — ⟦gras⟧ … ⟦/gras⟧ — que le frontend sait reconvertir en <strong>
+# (filet v10.158 b). Le choix de marqueurs à crochets blancs plutôt que d'étoiles ou de
+# balises est délibéré : ils n'existent dans aucune source scolaire, ne se confondent avec
+# aucune syntaxe, et s'ils survivent par accident jusqu'à la feuille élève le filet du
+# frontend les rattrape et le signale.
+#
+# BORNES CONNUES, écrites ici plutôt qu'oubliées :
+#  - le chemin « grilles » (texte_avec_grilles) construit son texte lui-même et n'est pas
+#    couvert : sur une page à grilles, le gras reste perdu. À traiter en v2.15.
+#  - PyMuPDF signale le gras par le bit 4 des drapeaux de span (valeur 16) ; certaines
+#    polices déclarent le gras dans leur NOM seulement (« …-Bold »), d'où le second test.
+_GRAS_OUV = "\u27e6gras\u27e7"
+_GRAS_FER = "\u27e6/gras\u27e7"
+
+
+def _span_est_gras(span):
+    if (span.get("flags", 0) & 16):
+        return True
+    nom = (span.get("font", "") or "").lower()
+    return ("bold" in nom) or ("black" in nom) or ("heavy" in nom)
+
+
+def _texte_gras(page):
+    """Texte de la page, gras marqué. Retombe sur get_text('text') au moindre doute."""
+    try:
+        d = page.get_text("dict")
+    except Exception:
+        return page.get_text("text")
+    blocs = []
+    for b in d.get("blocks", []):
+        if b.get("type", 0) != 0:
+            continue
+        lignes = []
+        for l in b.get("lines", []):
+            morceaux, ouvert = [], False
+            for s in l.get("spans", []):
+                txt = s.get("text", "")
+                if not txt:
+                    continue
+                g = _span_est_gras(s)
+                if g and not ouvert:
+                    morceaux.append(_GRAS_OUV); ouvert = True
+                elif not g and ouvert:
+                    morceaux.append(_GRAS_FER); ouvert = False
+                morceaux.append(txt)
+            if ouvert:
+                morceaux.append(_GRAS_FER)
+            ligne = "".join(morceaux)
+            # un marqueur qui n'entoure que des espaces n'apporte rien et gêne la relecture
+            ligne = ligne.replace(_GRAS_OUV + " " + _GRAS_FER, " ")
+            ligne = ligne.replace(_GRAS_OUV + _GRAS_FER, "")
+            lignes.append(ligne)
+        if lignes:
+            blocs.append("\n".join(lignes))
+    if not blocs:
+        return page.get_text("text")
+    return "\n".join(blocs) + "\n"
+
+
 def parse_pdf(content: bytes, filename: str):
     """
     Extrait d'un PDF, dans l'ordre de lecture :
@@ -778,9 +845,9 @@ def parse_pdf(content: bytes, filename: str):
                 texte_page = _grilles.texte_avec_grilles(
                     page, grilles_page, blocs_formes)
             except Exception:
-                texte_page = page.get_text("text")
+                texte_page = _texte_gras(page)      # v2.14
         else:
-            texte_page = page.get_text("text")
+            texte_page = _texte_gras(page)          # v2.14
             if blocs_formes:
                 texte_page += "\n" + "\n".join(b[2] for b in sorted(blocs_formes))
 
@@ -1791,7 +1858,7 @@ def health():
     # V2.10 — la version du module grilles est remontée telle qu'elle est
     # DANS le fichier déployé, jamais recopiée à la main : c'est ce qui
     # permet de savoir, en ligne, laquelle tourne vraiment.
-    return {"status": "ok", "version": "2.13",
+    return {"status": "ok", "version": "2.14",
             "grilles": (getattr(_grilles, "VERSION", "inconnue")
                         if GRILLES_ACTIVES else "absent"),
             "formes": (getattr(_formes, "VERSION", "inconnue")
