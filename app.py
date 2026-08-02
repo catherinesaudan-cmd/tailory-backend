@@ -1,5 +1,5 @@
 """
-Tailory Backend V2.14 — Pipeline documentaire pédagogique
+Tailory Backend V2.16 — Pipeline documentaire pédagogique
 FastAPI + python-docx + pdf2docx + Anthropic proxy + pictogrammes ARASAAC
 
 Endpoints:
@@ -961,8 +961,47 @@ def parse_pdf(content: bytes, filename: str):
                                 and (r & cadre).get_area() >= 0.6 * r.get_area()))]
             keep.append(cadre)
 
-        # Ordre de lecture : haut → bas, gauche → droite
-        keep.sort(key=lambda r: (round(r.y0 / 24), r.x0))
+        # ══ v2.16 — LES RANGÉES DE LECTURE S'ANCRENT SUR LES ZONES, PLUS SUR
+        # UNE GRILLE FIXE ═══════════════════════════════════════════════════
+        # Défaut mesuré le 02.08.2026, fiche i-profs CP 8a (tirage 10275) : les
+        # deux panneaux de la démonstration « ajouter / enlever » sont côte à
+        # côte, à 2,9 points de hauteur près — y0 = 249,8 (droite) et 252,7
+        # (gauche). Le découpage en tranches FIXES de 24 points tombe entre les
+        # deux : 249,8/24 = 10,41 → 10 ; 252,7/24 = 10,53 → 11. Le panneau de
+        # DROITE part donc avant celui de GAUCHE, et sur la feuille
+        # l'illustration « j'en barre un » se retrouve sous « Pour ajouter 1 ».
+        # Les deux images du tirage sont identiques OCTET POUR OCTET à celles que
+        # ce tri livre : l'inversion naît ici, pas dans le modèle.
+        #
+        # LA CAUSE EST LA GRILLE FIXE, PAS SA TAILLE. Deux zones d'une même
+        # rangée peuvent toujours tomber de part et d'autre d'une frontière,
+        # quelle que soit la largeur choisie. Agrandir la tranche déplacerait la
+        # frontière sans la supprimer.
+        #
+        # LE REMÈDE : la rangée s'ancre sur la PREMIÈRE zone rencontrée, pas sur
+        # un multiple de 24. Les zones sont triées par hauteur ; tant qu'une zone
+        # commence à moins de 24 points du début de la rangée en cours, elle est
+        # de cette rangée. Chaque rangée est ensuite lue de gauche à droite.
+        # La tolérance de 24 points est CELLE D'AVANT, inchangée : seul son point
+        # d'ancrage change. Tout document dont les zones ne tombaient pas sur une
+        # frontière garde donc exactement l'ordre qu'il avait.
+        _TOL_RANGEE = 24
+        _tri = sorted(keep, key=lambda r: (r.y0, r.x0))
+        _rangees, _cour, _debut = [], [], None
+        for _r in _tri:
+            if _debut is None or _r.y0 - _debut <= _TOL_RANGEE:
+                if _debut is None:
+                    _debut = _r.y0
+                _cour.append(_r)
+            else:
+                _rangees.append(_cour)
+                _cour, _debut = [_r], _r.y0
+        if _cour:
+            _rangees.append(_cour)
+        keep = []
+        for _rg in _rangees:
+            _rg.sort(key=lambda r: r.x0)
+            keep.extend(_rg)
 
         # Rasterisation 2x de chaque zone
         page_words = page.get_text("words")
@@ -1144,6 +1183,28 @@ def rasterize_blobs(jobs):
 
 
 # ─────────────────────────────────────────────
+# ─────────────────────────────────────────────
+# V2.15 — TOUS LES FORMATS BUREAUTIQUES PASSENT PAR LIBREOFFICE
+#
+# Le serveur n'acceptait que odt, docx et pdf. Une enseignante qui dépose un
+# vieux .doc — le format le plus répandu dans les classes — recevait « format
+# non supporté » et refermait l'outil. Or LibreOffice tourne déjà sur ce
+# serveur pour les ODT, et il ouvre nativement doc, rtf, odf et le reste.
+# Le commentaire de la v2.14 le disait déjà : « le même mécanisme fonctionnerait
+# pour doc/rtf si besoin un jour ». C'était une ligne.
+#
+# Le gain n'est pas seulement l'acceptation. Ces documents empruntent la route
+# ODT → PDF, donc le modèle VOIT les pages, au lieu de ne recevoir qu'un texte
+# extrait. C'est le meilleur des chemins disponibles.
+#
+# LE DOCX N'EST PAS DANS CETTE LISTE, ET C'EST VOLONTAIRE. Le faire basculer
+# ici règlerait le défaut connu des zones de texte flottantes (invisibles à
+# python-docx : ordre des jours, barème par item et titre perdus sur l'essai
+# des saisons). Mais c'est un changement de pipeline pour un format qui MARCHE
+# aujourd'hui : il se mesure sur un document témoin avant d'être fait, pas en
+# même temps qu'une ouverture de formats. C'est le chantier v2.10 nº 1.
+FORMATS_BUREAUTIQUES = ("odt", "doc", "rtf", "ott", "fodt", "sxw", "wps", "abw")
+
 # ODT (et formats bureautiques) : conversion → PDF via LibreOffice
 # La route ODT→PDF est volontaire : les ODT contiennent souvent des formes
 # vectorielles dessinées nativement (quadrillages, figures géométriques…)
@@ -1180,13 +1241,38 @@ def convert_office_to_pdf(content: bytes, ext: str):
 
 
 # ─────────────────────────────────────────────
+# V2.15 — LE SERVEUR ANNONCE LES FORMATS QU'IL SAIT LIRE
+#
+# La page portait sa propre liste d'extensions, écrite en dur. Deux sources de
+# vérité : le jour où le serveur apprend un format, personne ne pense à mettre
+# la page à jour, et la capacité existe sans être offerte — c'est exactement ce
+# qui vient de se passer avec le .doc. Le serveur est le seul à savoir ce qu'il
+# sait ouvrir : il le dit, la page l'affiche.
+FORMATS_ACCEPTES = tuple(sorted(set(FORMATS_BUREAUTIQUES + ("pdf", "docx", "txt"))))
+
+
+@app.get("/formats")
+async def formats_acceptes():
+    """Liste des extensions que /parse sait traiter. La page s'en sert pour
+    construire son filtre de fichier et son message d'erreur — elle n'en tient
+    plus sa propre copie."""
+    return {
+        "formats": list(FORMATS_ACCEPTES),
+        "bureautiques": list(FORMATS_BUREAUTIQUES),
+        "note": "les formats bureautiques passent par LibreOffice puis par le "
+                "pipeline PDF : le modèle voit alors les pages",
+    }
+
+
+# ─────────────────────────────────────────────
 # ENDPOINT : /parse
 # DOCX / PDF / ODT → structure JSON pédagogique
 # ─────────────────────────────────────────────
 @app.post("/parse")
 async def parse_document(file: UploadFile = File(...)):
     """
-    Reçoit un DOCX, un PDF ou un ODT.
+    Reçoit un PDF, un DOCX, ou tout format bureautique lisible par LibreOffice
+    (odt, doc, rtf…).
     Retourne une structure JSON avec blocs texte, images, tableaux,
     type d'exercice détecté, et positions relatives.
     ODT : converti en PDF (LibreOffice) puis traité par le pipeline PDF.
@@ -1195,16 +1281,15 @@ async def parse_document(file: UploadFile = File(...)):
     filename = file.filename or "document"
     ext = filename.rsplit(".", 1)[-1].lower()
 
-    # ODT (LibreOffice) : conversion en PDF puis pipeline PDF existant.
-    # (le même mécanisme fonctionnerait pour doc/rtf si besoin un jour)
-    if ext == "odt":
+    # Formats bureautiques (LibreOffice) : conversion en PDF puis pipeline PDF.
+    if ext in FORMATS_BUREAUTIQUES:
         pdf_bytes, conv_err = convert_office_to_pdf(content, ext)
         if pdf_bytes is None:
             raise HTTPException(
-                422, f"Conversion ODT→PDF échouée (LibreOffice) : {conv_err}. "
-                     "Exportez le document en PDF depuis LibreOffice et réessayez.")
+                422, f"Conversion {ext.upper()}→PDF échouée (LibreOffice) : {conv_err}. "
+                     "Enregistrez le document en PDF et réessayez.")
         result = parse_pdf(pdf_bytes, filename)
-        result["source_format"] = "odt"
+        result["source_format"] = ext
         # Joindre le PDF converti pour qu'il soit transmis à l'IA comme document
         # natif. V2.9.3 : le plafond passe de 150 000 à 4 000 000 caractères
         # base64 (~3 Mo de PDF), aligné sur PDF_B64_MAX du frontend v10.62.
@@ -1858,7 +1943,7 @@ def health():
     # V2.10 — la version du module grilles est remontée telle qu'elle est
     # DANS le fichier déployé, jamais recopiée à la main : c'est ce qui
     # permet de savoir, en ligne, laquelle tourne vraiment.
-    return {"status": "ok", "version": "2.14",
+    return {"status": "ok", "version": "2.16",
             "grilles": (getattr(_grilles, "VERSION", "inconnue")
                         if GRILLES_ACTIVES else "absent"),
             "formes": (getattr(_formes, "VERSION", "inconnue")
