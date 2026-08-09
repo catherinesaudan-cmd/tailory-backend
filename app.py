@@ -1,28 +1,20 @@
 """
-Tailory Backend V2.19 — Pipeline documentaire pédagogique
-
-⚠ LA VERSION SE DÉCLARE ICI ET DANS /health, ET LES DEUX DOIVENT CONCORDER.
-  Relevé de Catherine, 09.08.2026 : l'en-tête disait encore V2.17 quand /health
-  répondait 2.19. Deux sources de vérité pour la même chose — c'est précisément
-  ce que le projet interdit (§ 2.4). La batterie le vérifie désormais.
+Tailory Backend V2.17 — Pipeline documentaire pédagogique
 FastAPI + python-docx + pdf2docx + Anthropic proxy + pictogrammes ARASAAC
-
+ 
 Endpoints:
   POST /pictos   → résolution de mots-clés en pictogrammes ARASAAC (base64)
                    (chantier prioritaire validé : supports visuels du mode
                     Participation — non-lecteur, non-verbal/CAA, allophone)
-  POST /parse    → DOCX/PDF/ODT/DOC/RTF/… → structure JSON pédagogique
-                   (formats bureautiques : convertis en PDF via LibreOffice puis
-                    pipeline PDF — indispensable car ils contiennent souvent des
-                    formes vectorielles natives invisibles à l'extracteur DOCX.
-                    V2.19 : un DOCX dont le contenu est enfermé dans des cadres
-                    emprunte la même route ; les autres gardent la route texte,
-                    qui ne coûte rien.)
+  POST /parse    → DOCX/PDF/ODT → structure JSON pédagogique
+                   (ODT : converti en PDF via LibreOffice puis pipeline PDF —
+                    indispensable car les ODT contiennent souvent des formes
+                    vectorielles natives invisibles pour l'extracteur DOCX)
   POST /generate → proxy Anthropic avec retry + chunking
   POST /export   → structure JSON adaptée → DOCX
   POST /convert  → PDF → DOCX (existant, conservé)
   GET  /health   → vérification
-
+ 
 V2.11 (chantier 6.8 — segments courts étiquetés, 31 juillet 2026) :
   · Un trait fin de 7 à 14 mm devient une figure candidate s'il porte une
     ÉTIQUETTE DE SÉRIE juste à sa gauche — une lettre ou un chiffre seul
@@ -42,7 +34,7 @@ V2.11 (chantier 6.8 — segments courts étiquetés, 31 juillet 2026) :
     fermée pour cette version). Les promus subissent ensuite les mêmes
     filtres anti-bruit que les longs (isolement, souligné, familles) et le
     filtre v2.5 des pages de mesure.
-
+ 
 V2.10 (grilles et formes composites, 27 juillet 2026) :
   · Les quadrillages et les tableaux d'une source ne partent plus en miettes.
     Trois symptômes réparés, tous mesurés sur un cas d'essai fabriqué :
@@ -62,14 +54,14 @@ V2.10 (grilles et formes composites, 27 juillet 2026) :
     Module `grilles.py`, batterie `test_grilles_v210.py` (21 cas, à vide).
     Si le module est absent au déploiement, le pipeline retombe à l'identique
     sur le comportement 2.9.3 — aucune panne, seulement l'ancien défaut.
-
+ 
 V2.9.3 (expérience du mode dégradé, 26 juillet 2026) :
   · PDF_B64_MAX : le plafond d'attachement du PDF converti (ODT) passe de
     150 000 à 4 000 000 caractères base64. Il doublait en silence le plafond
     du frontend : remonter celui du frontend seul ne changeait rien, le PDF
     ne quittait jamais le backend. Quand le plafond est dépassé, la réponse
     porte désormais « pdf_b64_skipped_bytes » — plus de rejet muet.
-
+ 
 V2.9.2 (chantier ARASAAC seul — périmètre validé par Catherine) :
   · POST /pictos : {"mots": ["araignée", …], "lang": "fr"} → pour chaque mot,
     le meilleur pictogramme ARASAAC en data-URL PNG 300 px, prêt à injecter
@@ -87,7 +79,7 @@ V2.9.2 (chantier ARASAAC seul — périmètre validé par Catherine) :
     réponse (obligation de licence — ligne à imprimer en pied de fiche).
   · /health expose arasaac:"ok"/"unreachable" (sonde légère, 1 requête test
     mise en cache) pour vérifier l'accès réseau depuis Render au déploiement.
-
+ 
 V2.9.1 (retour essai 44 — régression Pacôme corrigée) :
   · COMPOSITES = SCÈNES SEULEMENT : la garde par paires de la V2.9 laissait
     fusionner les grands rasters qui se CHEVAUCHENT (scans à marges
@@ -98,7 +90,7 @@ V2.9.1 (retour essai 44 — régression Pacôme corrigée) :
     sont dissous en rasters individuels (comportement V2.8 restauré pour
     les scans/photos/cliparts, composites conservés pour les scènes :
     pièces, billets, tas de tomates, vignettes).
-
+ 
 V2.9 (audit essai 43, validé localement sur EvalSerie1maths5P.odt — 168 → 93 figures) :
   · CLUSTERING RASTER-RASTER : la règle V2.8 « rasters autonomes » pulvérisait
     les scènes composées de nombreux petits rasters (série 5P : 16 pièces de
@@ -117,7 +109,7 @@ V2.9 (audit essai 43, validé localement sur EvalSerie1maths5P.odt — 168 → 9
     (p5 de la 5P : écarts intra/inter-collections indistinguables — seules
     les bordures séparent les 4 collections, retrouvées une à une : 1, 8,
     4 et 3 pièces).
-
+ 
 V2.8 (retour essai 39, validé localement sur Pacomefantome.odt) :
   · RASTERS AUTONOMES : une image raster (scan, photo, dessin importé) est
     déjà une unité sémantique complète — elle n'est PLUS clusterisée, ni avec
@@ -129,7 +121,7 @@ V2.8 (retour essai 39, validé localement sur Pacomefantome.odt) :
     identiques (recouvrement ≥ 80 %) sont dédupliqués. Le clustering ne
     s'applique désormais qu'aux tracés VECTORIELS (une figure = plusieurs
     primitives), sa raison d'être.
-
+ 
 V2.7 (retours essais 36-37, validé localement sur AireDefinitionetMesure.odt) :
   · COMPOSANTES CONNEXES : le clustering par union de bounding-box était
     structurellement vorace — chaque fusion créait une boîte plus grande qui
@@ -158,7 +150,7 @@ V2.7 (retours essais 36-37, validé localement sur AireDefinitionetMesure.odt) :
     les bandeaux gris qui fuyaient dans les fiches des essais 36-37.
     Les figures plates légitimes survivent : tissus sans texte (lettres
     vectorielles), lignes graduées (chiffres seulement).
-
+ 
 V2.3 (retours essais 25-29) :
   · FONDS DE PAGE : les rectangles couvrant > 85 % de la page (LibreOffice
     exporte un fond blanc pleine page selon le modèle de document) sont exclus
@@ -183,7 +175,7 @@ V2.3 (retours essais 25-29) :
         longueur (lignes d'écriture, grilles) — les segments à mesurer ont
         des longueurs toutes différentes, c'est le principe de l'exercice.
 """
-
+ 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -200,24 +192,24 @@ import glob
 import tempfile
 import subprocess
 from typing import Optional
-
+ 
 # python-docx
 from docx import Document as DocxDocument
 from docx.shared import Inches, Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
-
+ 
 # pdf2docx (conversion PDF→DOCX existante)
 from pdf2docx import Converter
-
+ 
 # V2.9.3 — plafond d'attachement du PDF converti, en caractères base64.
 # Doit rester égal à PDF_B64_MAX du frontend (tailoryv10_62.html) : un plafond
 # plus bas ici filtrerait en amont, invisiblement, quoi que fasse le frontend.
 PDF_B64_MAX = 4_000_000  # ~3 Mo de PDF, une trentaine de pages illustrées
-
+ 
 app = FastAPI(title="Tailory Backend V2")
-
+ 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -230,7 +222,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
+ 
 # ─────────────────────────────────────────────
 # MODÈLES DE TYPES D'EXERCICES
 # ─────────────────────────────────────────────
@@ -244,7 +236,7 @@ EXERCISE_KEYWORDS = {
     "observer":   ["observe", "observer", "regardes", "regarde"],
     "lire":       ["lis", "lire", "lisez", "lecture"],
 }
-
+ 
 def detect_exercise_type(text: str) -> str:
     text_lower = text.lower()
     for ex_type, keywords in EXERCISE_KEYWORDS.items():
@@ -252,15 +244,15 @@ def detect_exercise_type(text: str) -> str:
             if kw in text_lower:
                 return ex_type
     return "autre"
-
-
+ 
+ 
 # ─────────────────────────────────────────────
 # PDF : extraction PyMuPDF — raster + vectoriel + lignes fines
 # Clustering v2.7 : composantes connexes (fini l'absorption par bbox)
 # ─────────────────────────────────────────────
 import fitz  # PyMuPDF, déjà installé (dépendance pdf2docx)
-
-
+ 
+ 
 def _connected_components(rects, margin=10.0):
     """v2.7 — Regroupe les primitives par COMPOSANTES CONNEXES : arête entre
     deux primitives d'ORIGINE si leur écart < margin ; la bbox de chaque
@@ -271,29 +263,29 @@ def _connected_components(rects, margin=10.0):
     rects = [fitz.Rect(r) for r in rects]
     n = len(rects)
     parent = list(range(n))
-
+ 
     def find(a):
         while parent[a] != a:
             parent[a] = parent[parent[a]]
             a = parent[a]
         return a
-
+ 
     def union(a, b):
         ra, rb = find(a), find(b)
         if ra != rb:
             parent[ra] = rb
-
+ 
     for i in range(n):
         gi = fitz.Rect(rects[i].x0 - margin, rects[i].y0 - margin,
                        rects[i].x1 + margin, rects[i].y1 + margin)
         for j in range(i + 1, n):
             if gi.intersects(rects[j]):
                 union(i, j)
-
+ 
     comps = {}
     for i in range(n):
         comps.setdefault(find(i), []).append(rects[i])
-
+ 
     out = []
     for members in comps.values():
         bb = fitz.Rect(members[0])
@@ -301,8 +293,8 @@ def _connected_components(rects, margin=10.0):
             bb |= m
         out.append(bb)
     return out
-
-
+ 
+ 
 def _cluster_rasters(rasters, page, margin=16.0):
     """v2.9 — Les rasters se regroupent ENTRE EUX (jamais avec les vecteurs,
     acquis v2.8 conservé) : les scènes composées de nombreux petits rasters
@@ -325,34 +317,34 @@ def _cluster_rasters(rasters, page, margin=16.0):
     n = len(rasters)
     if n <= 1:
         return list(rasters)
-
+ 
     def _gap(a, b):
         dx = max(0.0, max(a.x0, b.x0) - min(a.x1, b.x1))
         dy = max(0.0, max(a.y0, b.y0) - min(a.y1, b.y1))
         return (dx * dx + dy * dy) ** 0.5
-
+ 
     parent = list(range(n))
-
+ 
     def find(a):
         while parent[a] != a:
             parent[a] = parent[parent[a]]
             a = parent[a]
         return a
-
+ 
     def union(a, b):
         ra, rb = find(a), find(b)
         if ra != rb:
             parent[ra] = rb
-
+ 
     for i in range(n):
         for j in range(i + 1, n):
             if _gap(rasters[i], rasters[j]) < margin:
                 union(i, j)
-
+ 
     comps = {}
     for i in range(n):
         comps.setdefault(find(i), []).append(rasters[i])
-
+ 
     # v2.9.1 — FILTRE AU NIVEAU DU COMPOSANT (retour essai 44 : régression sur
     # Pacôme). La garde v2.9 par paires (« deux grands rasters SANS recouvrement
     # ne fusionnent pas ») laissait passer les scans à marges blanches qui se
@@ -368,7 +360,7 @@ def _cluster_rasters(rasters, page, margin=16.0):
     def _scene(members):
         return len(members) >= 3 and all(
             min(m.width, m.height) <= 120 for m in members)
-
+ 
     # Bordures horizontales candidates pour la scission (triplets de traits
     # LibreOffice regroupés à 3 pt près)
     hlines = []
@@ -379,7 +371,7 @@ def _cluster_rasters(rasters, page, margin=16.0):
                 hlines.append(fitz.Rect(r))
     except Exception:
         pass
-
+ 
     out = []
     for members in comps.values():
         if len(members) == 1:
@@ -417,8 +409,8 @@ def _cluster_rasters(rasters, page, margin=16.0):
                 gb |= m
             out.append(gb)
     return out
-
-
+ 
+ 
 def _drop_separator_rows(solids, pw):
     """v2.7 — RANGÉE de barres fines (h < 16 pt) alignées couvrant ensemble
     > 50 % de la largeur de page, sans voisin plein = trait de section coupé
@@ -447,8 +439,8 @@ def _drop_separator_rows(solids, pw):
                 drop.update(row)
                 used.update(row)
     return others + [b for i, b in enumerate(bars) if i not in drop]
-
-
+ 
+ 
 def _is_text_band(r, words):
     """v2.7 — bande plate (h < 32 pt ≈ 11 mm) contenant du texte : ≥ 2 mots
     de ≥ 3 lettres, ou 1 seul mot couvrant > 30 % de sa largeur = cellule
@@ -470,8 +462,8 @@ def _is_text_band(r, words):
                 n += 1
                 cover += wr.width
     return n >= 2 or (n >= 1 and cover > 0.3 * r.width)
-
-
+ 
+ 
 def _is_underline_of_text(words, t):
     """Ligne horizontale = souligné si du texte immédiatement au-dessus
     couvre ≥ 60 % de sa longueur.
@@ -493,14 +485,14 @@ def _is_underline_of_text(words, t):
             if ov > 0:
                 cover += ov
     return cover >= 0.6 * t.width
-
-
+ 
+ 
 # V2.11 (chantier 6.8) — plancher des segments courts étiquetés : 7,0 mm.
 # En dessous, rien ne passe, étiquette ou pas ; entre 7 et 14 mm, seulement
 # sous les deux conditions du bloc 2c ; à partir de 14,1 mm (40 pt), régime
 # inchangé.
 SEUIL_COURT_ETIQUETE = 19.8  # 7,0 mm en points PDF
-
+ 
 # V2.12 (chantier 4 — tirage essai_10127) — DISTANCE LETTRE → TRAIT.
 # La V2.11 exigeait l'étiquette à moins de 12 pt (4 mm) du départ du trait.
 # Mesuré le 29.07.2026 sur la page de mesure réellement utilisée (évaluation 3,
@@ -525,11 +517,11 @@ SEUIL_COURT_ETIQUETE = 19.8  # 7,0 mm en points PDF
 #   — la condition de série du bloc 2c, inchangée : il faut un autre trait
 #     étiqueté de longueur différente sur la page.
 TOL_ETIQUETTE_PT = 60.0
-
+ 
 _ETIQUETTE_SERIE = re.compile(r"^([A-Za-z]|\d{1,2})\s*[).]$")
 _LETTRE_SEULE = re.compile(r"^([A-Za-z]|\d{1,2})$")
-
-
+ 
+ 
 def _etiquette_de_serie(words, t):
     """V2.11 (chantier 6.8) — vrai si un mot-étiquette de série (lettre ou
     chiffre seul suivi d'une parenthèse ou d'un point : a) b) e) 1) 2.) se
@@ -549,7 +541,7 @@ def _etiquette_de_serie(words, t):
             if nxt[4].strip() in (")", ".") and abs(nxt[1] - w[1]) < 3 \
                and 0 <= nxt[0] - w[2] <= 6:
                 etiquettes.append((w[0], w[1], nxt[2], nxt[3], txt + nxt[4].strip()))
-
+ 
     for w in etiquettes:
         wx0, wy0, wx1, wy1 = w[:4]
         # à gauche : le mot finit avant le trait (chevauchement de 2 pt toléré),
@@ -581,8 +573,8 @@ def _etiquette_de_serie(words, t):
             if t.y0 - 3 <= cy <= t.y1 + 3:
                 return True
     return False
-
-
+ 
+ 
 def _collect_page_regions(page):
     """
     Régions candidates d'une page, en deux familles :
@@ -599,7 +591,7 @@ def _collect_page_regions(page):
     solids, thins = [], []
     courts = []  # V2.11 — candidats 7-14 mm, promus au bloc 2c ou jetés
     rasters = []  # v2.8 — les rasters ne passent PAS par le clustering
-
+ 
     # 1. Images raster — v2.8 : chaque raster est une figure autonome.
     for img in page.get_images(full=True):
         try:
@@ -625,7 +617,7 @@ def _collect_page_regions(page):
     rasters = dedup
     # v2.9 — composition des scènes multi-rasters (pièces, billets, tas…)
     rasters = _cluster_rasters(rasters, page)
-
+ 
     # 2. Tracés vectoriels
     try:
         for d in page.get_drawings():
@@ -653,7 +645,7 @@ def _collect_page_regions(page):
             solids.append(fitz.Rect(r))
     except Exception:
         pass
-
+ 
     # 2b. v2.7 — séparateurs partiels (rangées de barres) et bandes de texte
     # (en-têtes de tableaux, titres décorés) exclus AVANT clustering : ce sont
     # eux qui provoquaient les fusions en chaîne et les fuites de bandeaux gris.
@@ -665,7 +657,7 @@ def _collect_page_regions(page):
     # en amont pour ne pas générer deux figures du même contenu.
     solids = [r for r in solids
               if not any(ra.contains(r) for ra in rasters)]
-
+ 
     # 2c. V2.11 (chantier 6.8) — promotion des segments courts étiquetés.
     # Un trait de 7 à 14 mm n'entre qu'à deux conditions cumulées :
     #   1. une étiquette de série juste à sa gauche (a), e), 1), 2. …) ;
@@ -688,20 +680,20 @@ def _collect_page_regions(page):
                 if any(abs(L - L2) > 0.05 * max(L, L2)
                        for L2 in longueurs):
                     thins.append(t)
-
+ 
     # 3. Anti-bruit lignes fines
     if thins:
         words = words_v27
-
+ 
         def _isolated(t):
             probe = fitz.Rect(t.x0 - 3, t.y0 - 3, t.x1 + 3, t.y1 + 3)
             if any(probe.intersects(o) for o in solids):
                 return False
             return not any((o is not t) and probe.intersects(o) for o in thins)
-
+ 
         thins = [t for t in thins if _isolated(t)]
         thins = [t for t in thins if not _is_underline_of_text(words, t)]
-
+ 
         kept = []
         for t in thins:
             horiz = t.width >= t.height
@@ -712,10 +704,10 @@ def _collect_page_regions(page):
             if same < 3:
                 kept.append(t)
         thins = kept
-
+ 
     return solids, thins, rasters
-
-
+ 
+ 
 # ─────────────────────────────────────────────
 # V2.10 — grilles et formes composites
 # Import tolérant : si le module n'a pas été déployé à côté de app.py, le
@@ -728,15 +720,15 @@ try:
 except Exception:  # module absent ou illisible
     _grilles = None
     GRILLES_ACTIVES = False
-
+ 
 try:
     import formes as _formes
     FORMES_ACTIVES = True
 except Exception:
     _formes = None
     FORMES_ACTIVES = False
-
-
+ 
+ 
 # ══ v2.14 — LE GRAS DE LA SOURCE SURVIT À LA LECTURE DU PDF ═══════════════════════════
 # Chantier ouvert le 30.07.2026. La règle de mise en évidence (frontend v10.151) dit que
 # le gras de la source est reproduit par défaut ; mais quand la source arrive en PDF, le
@@ -758,15 +750,15 @@ except Exception:
 #    polices déclarent le gras dans leur NOM seulement (« …-Bold »), d'où le second test.
 _GRAS_OUV = "\u27e6gras\u27e7"
 _GRAS_FER = "\u27e6/gras\u27e7"
-
-
+ 
+ 
 def _span_est_gras(span):
     if (span.get("flags", 0) & 16):
         return True
     nom = (span.get("font", "") or "").lower()
     return ("bold" in nom) or ("black" in nom) or ("heavy" in nom)
-
-
+ 
+ 
 def _texte_gras(page):
     """Texte de la page, gras marqué. Retombe sur get_text('text') au moindre doute."""
     try:
@@ -802,8 +794,8 @@ def _texte_gras(page):
     if not blocs:
         return page.get_text("text")
     return "\n".join(blocs) + "\n"
-
-
+ 
+ 
 def parse_pdf(content: bytes, filename: str):
     """
     Extrait d'un PDF, dans l'ordre de lecture :
@@ -821,13 +813,13 @@ def parse_pdf(content: bytes, filename: str):
     grilles_inventaire = []
     formes_inventaire = []
     idx = 0
-
+ 
     for pno, page in enumerate(doc):
         pw, ph = page.rect.width, page.rect.height
         page_area = pw * ph
-
+ 
         solids, thins, rasters = _collect_page_regions(page)
-
+ 
         # V2.10 — grilles de la page : forme, contenu, comptage des cases.
         # `zones_grilles` liste les tableaux de texte, qui ne doivent plus
         # repartir en figure découpée : leur contenu est déjà transmis en
@@ -843,7 +835,7 @@ def parse_pdf(content: bytes, filename: str):
                 formes_page = []
         blocs_formes = [(f["rect"].y0, f["rect"].x0, _formes.decrire(f))
                         for f in formes_page]
-
+ 
         grilles_page, zones_grilles = [], []
         if GRILLES_ACTIVES:
             try:
@@ -858,7 +850,7 @@ def parse_pdf(content: bytes, filename: str):
             texte_page = _texte_gras(page)          # v2.14
             if blocs_formes:
                 texte_page += "\n" + "\n".join(b[2] for b in sorted(blocs_formes))
-
+ 
         # v2.5 — les lignes fines ne partent que si la page parle de mesure ou
         # de tracé : sur une fiche de français, les lignes de réponse aux
         # longueurs variées traversent le filtre « familles » (28 fausses
@@ -875,16 +867,16 @@ def parse_pdf(content: bytes, filename: str):
                     "géométr", "geometr"))
                     or re.search(r"\baires?\b", ptxt)):  # « aire » en mot entier — pas « faire »
                 thins = []
-
+ 
         # v2.4 — les lignes fines ne sont JAMAIS clusterisées : une ligne qui a
         # survécu aux filtres anti-bruit est un segment autonome à mesurer.
         regions = solids
-
+ 
         # Clustering v2.7 : composantes connexes sur les primitives d'origine,
         # marge 10 pt (l'écart réel entre deux figures distinctes du corpus
         # est ≥ 12 pt ; les sous-éléments d'une même figure restent < 10 pt).
         clusters = _connected_components(regions, margin=10.0)
-
+ 
         # Re-split (v2.3, adapté v2.7) : un cluster quasi pleine page n'est pas
         # jeté, il est re-clusterisé plus finement ; en dernier recours, ses
         # primitives pleines sont gardées individuellement.
@@ -903,14 +895,14 @@ def parse_pdf(content: bytes, filename: str):
                 else:
                     final.extend(r for r in solids
                                  if r.intersects(s) and r.width >= 24 and r.height >= 24)
-
+ 
         # v2.4 — chaque ligne fine part individuellement
         final.extend(thins)
         # v2.8/v2.9 — les rasters ne se mélangent jamais aux vecteurs ; depuis
         # v2.9 les scènes multi-rasters arrivent déjà composées (et re-scindées
         # aux bordures de tableau) par _cluster_rasters.
         final.extend(rasters)
-
+ 
         # Filtres finaux : figures pleines OU lignes fines assez longues
         # V2.11 — les segments courts étiquetés, promus au bloc 2c, passent
         # au même titre que les longs : la porte ne s'ouvre que pour EUX,
@@ -950,7 +942,7 @@ def parse_pdf(content: bytes, filename: str):
                     for ra in rasters):
                 continue
             keep.append(r)
-
+ 
         # V2.10 — le quadrillage part d'un seul tenant. Jusqu'ici ses traits
         # réguliers étaient éliminés comme du bruit et seules les zones
         # coloriées survivaient : le modèle recevait des taches sans repère,
@@ -968,7 +960,7 @@ def parse_pdf(content: bytes, filename: str):
                             or (not (r & cadre).is_empty
                                 and (r & cadre).get_area() >= 0.6 * r.get_area()))]
             keep.append(cadre)
-
+ 
         # ══ v2.17 — UNE FORME À MOITIÉ DANS LA ZONE Y EST PRISE ENTIÈRE ═════
         # Défaut mesuré le 02.08.2026 sur SIX documents sources (151 zones) :
         # 20 formes vectorielles sont AMPUTÉES par le cadre de découpe — un rond
@@ -1024,7 +1016,7 @@ def parse_pdf(content: bytes, filename: str):
             keep = _elargies
         except Exception:
             pass          # une page illisible ne doit pas faire tomber l'extraction
-
+ 
         # ══ v2.16 — LES RANGÉES DE LECTURE S'ANCRENT SUR LES ZONES, PLUS SUR
         # UNE GRILLE FIXE ═══════════════════════════════════════════════════
         # Défaut mesuré le 02.08.2026, fiche i-profs CP 8a (tirage 10275) : les
@@ -1066,7 +1058,7 @@ def parse_pdf(content: bytes, filename: str):
         for _rg in _rangees:
             _rg.sort(key=lambda r: r.x0)
             keep.extend(_rg)
-
+ 
         # Rasterisation 2x de chaque zone
         page_words = page.get_text("words")
         for r in keep:
@@ -1097,49 +1089,6 @@ def parse_pdf(content: bytes, filename: str):
                             letters += sum(1 for ch in w[4] if ch.isalpha())
                     if letters >= 3:
                         continue
-                # ══ V2.18 — LE CLIP EMPORTE LES REPÈRES QUI DÉSIGNENT LA FIGURE ══
-                # DÉFAUT RELEVÉ PAR CATHERINE (09.08.2026, trace écrite « Le
-                # Cercle ») : sur la figure du cercle, les repères A, B et C ne
-                # sont pas visibles dans l'image reprise. Mesuré : le clip
-                # s'arrête à la zone du TRACÉ — (67,274)–(237,444) — et les
-                # lettres sont des caractères de PAGE posés à côté. A est à
-                # cheval, B et C tombent dehors de 16 points. Seuls O et r,
-                # à l'intérieur du cercle, survivaient : 3 repères perdus sur 5.
-                #
-                # Une figure amputée de ses repères ne dit plus rien : « le
-                # segment [BC] est un diamètre » renvoie à des lettres absentes.
-                #
-                # PANEL (§ 2.2) sur deux documents réels de Catherine, 5 figures :
-                #   sans marge (l'existant)   11 repères · 97 mots de phrase avalés
-                #   marge fixe de 20 pt       16 repères · 100 mots avalés
-                #   marge de 8 %              14 repères · 101 mots avalés
-                #   CELUI-CI                  18 repères ·  97 mots avalés
-                # Les marges aveugles gagnent des repères et avalent du texte de
-                # leçon en prime — gravé dans une image, il devient illisible et
-                # non modifiable. Ici, AUCUNE marge : le clip s'étend jusqu'aux
-                # repères, et à eux seuls. Ce qui entre est nommé.
-                #
-                # RECONNAISSANCE PAR LA FORME (un mot d'une à trois lettres à
-                # moins de 24 pt du tracé) : PROVISOIRE PAR CONSTRUCTION — elle
-                # se trompera un jour sur un mot court légitime. Mesurée sur
-                # 5 figures : 0 mot de phrase avalé de plus que l'existant.
-                if not is_thin:
-                    voisin = fitz.Rect(clip.x0 - 24, clip.y0 - 24,
-                                       clip.x1 + 24, clip.y1 + 24) & page.rect
-                    etendu = fitz.Rect(clip)
-                    for w in page_words:
-                        t = (w[4] or "").strip()
-                        if not t or len(t) > 4:
-                            continue
-                        if not _EST_REPERE.match(t):
-                            continue
-                        wr = fitz.Rect(w[:4])
-                        if (wr & voisin).is_empty:
-                            continue
-                        etendu |= wr
-                    if etendu != clip:
-                        clip = fitz.Rect(etendu.x0 - 2, etendu.y0 - 2,
-                                         etendu.x1 + 2, etendu.y1 + 2) & page.rect
                 pix = page.get_pixmap(clip=clip, matrix=fitz.Matrix(2, 2))
                 if pix.width < 8 or pix.height < 8:
                     continue
@@ -1159,7 +1108,7 @@ def parse_pdf(content: bytes, filename: str):
                 idx += 1
             except Exception:
                 pass
-
+ 
         for g in grilles_page:
             grilles_inventaire.append({
                 "page": pno + 1,
@@ -1172,7 +1121,7 @@ def parse_pdf(content: bytes, filename: str):
                            "composite": z["composite"]} for z in g["zones"]],
                 "comptage_refuse": g["comptage_refuse"],
             })
-
+ 
         for f in formes_page:
             formes_inventaire.append({
                 "page": pno + 1,
@@ -1182,9 +1131,9 @@ def parse_pdf(content: bytes, filename: str):
                 "aire_mm2": f["aire_mm2"],
                 "aire_refusee": f["aire_refusee"],
             })
-
+ 
         full_text.append(texte_page)
-
+ 
     doc.close()
     return {
         "filename": filename,
@@ -1203,7 +1152,7 @@ def parse_pdf(content: bytes, filename: str):
         "formes": formes_inventaire,
         "formes_actives": FORMES_ACTIVES,
     }
-
+ 
 # ─────────────────────────────────────────────
 # DOCX : rasterisation générique des images non-web
 # (EMF / WMF / TIFF / vectoriels) → PNG via LibreOffice
@@ -1215,21 +1164,21 @@ _NONWEB_EXT = {
     "x-wmf": "wmf", "wmf": "wmf",
     "tiff": "tiff", "tif": "tiff",
 }
-
-
+ 
+ 
 def _is_web_safe(ct: str) -> bool:
     ct = (ct or "").lower()
     return any(w in ct for w in _WEB_SAFE)
-
-
+ 
+ 
 def _nonweb_ext(ct: str):
     ct = (ct or "").lower()
     for frag, ext in _NONWEB_EXT.items():
         if frag in ct:
             return ext
     return None
-
-
+ 
+ 
 def _autocrop_png(png_bytes: bytes, pad: int = 6) -> bytes:
     """Rogne les marges blanches d'un PNG (LibreOffice exporte une page entière)."""
     try:
@@ -1248,8 +1197,8 @@ def _autocrop_png(png_bytes: bytes, pad: int = 6) -> bytes:
         return out.getvalue()
     except Exception:
         return png_bytes
-
-
+ 
+ 
 def rasterize_blobs(jobs):
     """
     jobs : liste de (key, blob_bytes, ext).
@@ -1287,8 +1236,8 @@ def rasterize_blobs(jobs):
                 except Exception:
                     pass
     return result
-
-
+ 
+ 
 # ─────────────────────────────────────────────
 # ─────────────────────────────────────────────
 # V2.15 — TOUS LES FORMATS BUREAUTIQUES PASSENT PAR LIBREOFFICE
@@ -1311,153 +1260,13 @@ def rasterize_blobs(jobs):
 # aujourd'hui : il se mesure sur un document témoin avant d'être fait, pas en
 # même temps qu'une ouverture de formats. C'est le chantier v2.10 nº 1.
 FORMATS_BUREAUTIQUES = ("odt", "doc", "rtf", "ott", "fodt", "sxw", "wps", "abw")
-
+ 
 # ODT (et formats bureautiques) : conversion → PDF via LibreOffice
 # La route ODT→PDF est volontaire : les ODT contiennent souvent des formes
 # vectorielles dessinées nativement (quadrillages, figures géométriques…)
 # qui seraient PERDUES en ODT→DOCX (DrawingML non extrait), alors que le
 # pipeline PDF/PyMuPDF les récupère comme figures via get_drawings().
 # ─────────────────────────────────────────────
-# ── V2.18 — CE QU'EST UN REPÈRE DE FIGURE ────────────────────────────────────
-# Une à trois lettres ou chiffres isolés : A, B, C, O, r, (d1), 12. C'est ce qui
-# DÉSIGNE une figure sans en faire partie — le clip de rasterisation doit les
-# emporter, sinon la figure arrive muette. Déclaré ici, une seule fois.
-# ── V2.18 — LES POLICES DE WORD, ET POURQUOI ELLES COMPTENT ──────────────────
-# DÉFAUT RELEVÉ PAR CATHERINE (09.08.2026) : « les mots rayon et centre sont
-# coupés du premier schéma ». Mesuré sur la trace écrite « Le Cercle » : les
-# étiquettes sortent en « Rayo » et « Cemt » — coupées DÈS LA CONVERSION, avant
-# toute extraction. Le document demande CENTURY GOTHIC ; le serveur ne l'a pas,
-# LibreOffice substitue DejaVu Sans, mesurée 12 % PLUS LARGE. Le texte déborde
-# de sa zone et le cadre le rogne. Aucun code applicatif ne peut récupérer des
-# lettres qui n'ont jamais été tracées.
-#
-# Le document en demande sept : Arial, Times New Roman, Courier New, Verdana,
-# Symbol, Wingdings, Century Gothic. Les Liberation (déjà installées) portent
-# les métriques EXACTES d'Arial, Times et Courier — ces trois-là vont bien.
-# Manquent : Century Gothic (équivalent métrique libre : URW Gothic), et selon
-# les documents Verdana (DejaVu Sans est proche) et les polices de symboles.
-#
-# LE REMÈDE VIT DANS LE DOCKERFILE, PAS ICI :
-#     apt-get install -y fonts-urw-base35 fonts-liberation \
-#                        fonts-crosextra-carlito fonts-crosextra-caladea
-#   + la table de substitution métrique 99-tailory-word.conf (fournie).
-# ÉPROUVÉ ICI : sans la table, Century Gothic devenait DejaVu Sans ; avec elle,
-# URW Gothic. Reconversion du document de Catherine : le corps du texte passe
-# de DejaVu à URWGothic-Book — 27 fragments sur 63.
-#
-# ⚠ LIMITE DÉCLARÉE, ET ELLE EST NETTE. Les DEUX étiquettes du compas restent
-# tronquées après ce remède : mesuré, elles ne sont PAS en Century Gothic mais
-# dans une police que fontconfig ne sait pas mieux mapper — elles sortent en
-# DejaVu Sans, où « Centre » mesure 54 points pour une boîte de 43. Aucune des
-# substitutions libres disponibles n'est assez étroite : Verdana 54, Century
-# Gothic 53, Arial 48 — toutes au-dessus de 43. Word, lui, rétrécit le texte
-# pour le faire tenir ; LibreOffice le rogne.
-# Ce volet AMÉLIORE le rendu général et NOMME la cause ; il ne répare pas ces
-# deux étiquettes-là. Le signalement à la fiche reste donc dû, et il existe.
-#
-# La sonde ci-dessous ne répare rien : elle DIT ce qui manque, pour qu'une
-# troncature ne soit plus attribuée au hasard. Un défaut qu'on ne sait pas
-# nommer revient (§ 1.1).
-POLICES_ATTENDUES = {
-    "Century Gothic": ("URW Gothic", "fonts-urw-base35"),
-    "Arial": ("Liberation Sans", "fonts-liberation"),
-    "Times New Roman": ("Liberation Serif", "fonts-liberation"),
-    "Courier New": ("Liberation Mono", "fonts-liberation"),
-    "Calibri": ("Carlito", "fonts-crosextra-carlito"),
-    "Cambria": ("Caladea", "fonts-crosextra-caladea"),
-}
-
-
-def polices_manquantes():
-    """Quelles substitutions de police risquent de tronquer un cadre ?
-
-    Rend la liste des polices Word dont AUCUN équivalent métrique n'est installé.
-    Une substitution par une police plus large rogne les zones de texte.
-    """
-    try:
-        import subprocess
-        installees = subprocess.run(["fc-list", "--format", "%{family}\n"],
-                                    capture_output=True, text=True, timeout=10).stdout
-    except Exception:
-        return ["(fc-list injoignable)"]
-    manque = []
-    for word, (equiv, paquet) in POLICES_ATTENDUES.items():
-        if equiv.lower() not in installees.lower():
-            manque.append(f"{word} → {equiv} absente ({paquet})")
-    return manque
-
-
-# ── V2.19 — UN DOCX DONT LE CONTENU EST ENFERMÉ DANS DES CADRES ──────────────
-# DÉFAUT MESURÉ le 09.08 sur deux .docx réels de Catherine. Word permet de poser
-# du texte dans des CADRES flottants (zones de texte) : titres, objectifs,
-# encadrés de leçon, étiquettes de schéma, onglets latéraux. Les modèles de
-# fiches téléchargés par les enseignantes en sont bâtis. python-docx ne les voit
-# PAS — il ne lit que le texte courant.
-#
-#   trace écrite « solides »        : 14 cadres, contenu INVISIBLE au flux,
-#                                     1 500 caractères perdus — le document
-#                                     sortait à ZÉRO caractère ;
-#   exercices « droites parallèles » : 52 cadres invisibles, 1 636 caractères,
-#                                     dont « Savoir identifier et tracer deux
-#                                     droites parallèles » — l'OBJECTIF de la
-#                                     fiche. Le modèle adaptait à l'aveugle.
-#
-# LE REMÈDE N'EST PAS DE TOUT BASCULER. Arbitrage de Catherine, 09.08 : la route
-# LibreOffice fait VOIR la page au modèle, donc elle coûte — mesuré, de 3 % du
-# prix d'une génération pour une page à ~13 % pour treize. On ne le paie que
-# pour les documents qui en ont besoin.
-#
-# LE CRITÈRE NE COMPTE PAS LES CADRES, IL COMPTE CE QUI MANQUERAIT. Un cadre
-# décoratif, ou dont le texte se retrouve dans le flux, ne déclenche rien. Seul
-# compte le contenu QU'ON NE LIRAIT NULLE PART AILLEURS.
-#
-# Lecture directe du XML, sans conversion : quelques millisecondes.
-# RECONNAISSANCE PAR LA FORME (balise w:txbxContent) : c'est une DÉCLARATION du
-# format Word, pas une liste de mots — durable (§ 2.1).
-# LE SEUIL SE MESURE, IL NE SE CHOISIT PAS (§ 2.2). Panel sur les trois témoins,
-# avec la réponse attendue écrite AVANT : 0 → 2/3 (le témoin ordinaire bascule
-# pour rien) · 50 · 120 · 300 → 3/3 · 500 → 2/3 · 800 et au-delà → 1/3.
-# Le palier juste va de 50 à 300 ; 120 est pris au milieu, à distance des deux
-# bords. Mesures : solides 750 caractères, droites parallèles 411, témoin 0.
-# ⚠ TROIS documents, dont un construit. Le seuil se revoit dès qu'un lot réel
-# de .docx d'enseignantes est disponible — c'est la mesure qui manque.
-SEUIL_CADRES_CAR = 120
-
-
-def _sans_espaces(t: str) -> str:
-    return re.sub(r"[^a-zàâéèêëîïôûùüçA-ZÀÂÉÈÊËÎÏÔÛÙÜÇ]", "", (t or "")).lower()
-
-
-def docx_contenu_en_cadres(content: bytes, flux: str):
-    """Combien de caractères sont enfermés dans des cadres et introuvables ailleurs ?
-
-    Rend (nb_caracteres_perdus, [extraits]). Le flux est le texte que python-docx
-    sait déjà lire : ce qui s'y retrouve n'est pas perdu.
-    """
-    try:
-        with zipfile.ZipFile(io.BytesIO(content)) as z:
-            xml = z.read("word/document.xml").decode("utf-8", "replace")
-    except Exception:
-        return 0, []
-    cf = _sans_espaces(flux)
-    perdus, extraits, vus = 0, [], set()
-    for bloc in re.findall(r"<w:txbxContent>(.*?)</w:txbxContent>", xml, re.S):
-        t = "".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t>", bloc)).strip()
-        if not t or t in vus:
-            continue
-        vus.add(t)
-        c = _sans_espaces(t)
-        if not c or c[:20] in cf:
-            continue          # ce texte est déjà lisible dans le flux
-        perdus += len(t)
-        if len(extraits) < 5:
-            extraits.append(re.sub(r"\s+", " ", t)[:70])
-    return perdus, extraits
-
-
-_EST_REPERE = re.compile(r"^[A-Za-z]\d?$|^\(?[dD]\d\)?$|^\d{1,3}$")
-
-
 def convert_office_to_pdf(content: bytes, ext: str):
     """
     Convertit un document bureautique (odt, doc, rtf…) en PDF via LibreOffice.
@@ -1485,8 +1294,8 @@ def convert_office_to_pdf(content: bytes, ext: str):
             return None, f"soffice n'a pas produit de PDF. stdout: {out} | stderr: {err}"
         with open(pdf_path, "rb") as f:
             return f.read(), ""
-
-
+ 
+ 
 # ─────────────────────────────────────────────
 # V2.15 — LE SERVEUR ANNONCE LES FORMATS QU'IL SAIT LIRE
 #
@@ -1496,8 +1305,8 @@ def convert_office_to_pdf(content: bytes, ext: str):
 # qui vient de se passer avec le .doc. Le serveur est le seul à savoir ce qu'il
 # sait ouvrir : il le dit, la page l'affiche.
 FORMATS_ACCEPTES = tuple(sorted(set(FORMATS_BUREAUTIQUES + ("pdf", "docx", "txt"))))
-
-
+ 
+ 
 @app.get("/formats")
 async def formats_acceptes():
     """Liste des extensions que /parse sait traiter. La page s'en sert pour
@@ -1509,8 +1318,8 @@ async def formats_acceptes():
         "note": "les formats bureautiques passent par LibreOffice puis par le "
                 "pipeline PDF : le modèle voit alors les pages",
     }
-
-
+ 
+ 
 # ─────────────────────────────────────────────
 # ENDPOINT : /parse
 # DOCX / PDF / ODT → structure JSON pédagogique
@@ -1527,7 +1336,7 @@ async def parse_document(file: UploadFile = File(...)):
     content = await file.read()
     filename = file.filename or "document"
     ext = filename.rsplit(".", 1)[-1].lower()
-
+ 
     # Formats bureautiques (LibreOffice) : conversion en PDF puis pipeline PDF.
     if ext in FORMATS_BUREAUTIQUES:
         pdf_bytes, conv_err = convert_office_to_pdf(content, ext)
@@ -1550,50 +1359,17 @@ async def parse_document(file: UploadFile = File(...)):
         else:
             result["pdf_b64_skipped_bytes"] = len(pdf_bytes)
         return result
-
+ 
     # PDF : extraction directe PyMuPDF (images raster + figures vectorielles)
     if ext == "pdf":
         return parse_pdf(content, filename)
-
+ 
     # Parser le DOCX
     try:
         doc = DocxDocument(io.BytesIO(content))
     except Exception as e:
         raise HTTPException(400, f"Impossible de lire le document : {e}")
-
-    # ══ V2.19 — LE DOCX DONT LE CONTENU EST EN CADRES PREND LA ROUTE PDF ══════
-    # Le texte courant seul ne dit pas tout de ce document : on mesure ce qui
-    # resterait invisible, et on ne convertit QUE si la perte est réelle.
-    # Voir le commentaire de docx_contenu_en_cadres.
-    if ext == "docx":
-        _flux = "\n".join(p.text for p in doc.paragraphs)
-        for _t in doc.tables:
-            for _r in _t.rows:
-                _flux += "\n" + " ".join(c.text for c in _r.cells)
-        _perdus, _extraits = docx_contenu_en_cadres(content, _flux)
-        if _perdus >= SEUIL_CADRES_CAR:
-            pdf_bytes, conv_err = convert_office_to_pdf(content, "docx")
-            if pdf_bytes is not None:
-                result = parse_pdf(pdf_bytes, filename)
-                result["source_format"] = "docx"
-                # POURQUOI cette route a été prise : l'enseignante et le journal
-                # doivent pouvoir le lire, sinon le surcoût est inexplicable.
-                result["route"] = "libreoffice"
-                result["cadres_caracteres"] = _perdus
-                result["cadres_extraits"] = _extraits
-                if len(pdf_bytes) * 4 / 3 < PDF_B64_MAX:
-                    result["pdf_b64"] = base64.b64encode(pdf_bytes).decode()
-                else:
-                    result["pdf_b64_skipped_bytes"] = len(pdf_bytes)
-                return result
-            # Conversion impossible : on NE BLOQUE PAS un format qui marchait.
-            # La route habituelle reprend, et le manque est signalé.
-            _conv_ko = conv_err
-        else:
-            _conv_ko = ""
-    else:
-        _perdus, _extraits, _conv_ko = 0, [], ""
-
+ 
     # Extraire toutes les images du document.
     # Les images web (png/jpeg/…) sont encodées telles quelles ; les formats
     # non affichables par un navigateur (EMF/WMF/TIFF vectoriels des DOCX Word)
@@ -1617,7 +1393,7 @@ async def parse_document(file: UploadFile = File(...)):
                     raster_jobs.append((rId, img_blob, _nonweb_ext(content_type) or "emf"))
             except Exception:
                 pass
-
+ 
     # Rasterisation groupée des images non-web → PNG affichables
     for rId, png in rasterize_blobs(raster_jobs).items():
         img_b64 = base64.b64encode(png).decode()
@@ -1628,11 +1404,11 @@ async def parse_document(file: UploadFile = File(...)):
         }
     # Les images non converties (ex : WDP illisible) sont simplement absentes :
     # le frontend affichera alors un placeholder étiqueté « coller ici ».
-
+ 
     # Construire les blocs
     blocks = []
     img_counter = [0]  # compteur global d'images
-
+ 
     def extract_paragraph_images(para_element):
         """Extrait les images inline d'un paragraphe."""
         found = []
@@ -1648,18 +1424,18 @@ async def parse_document(file: UploadFile = File(...)):
                     "content_type": images[rId]["content_type"]
                 })
         return found
-
+ 
     def process_paragraph(para):
         text = para.text.strip()
         imgs = extract_paragraph_images(para._element)
-
+ 
         if not text and not imgs:
             return None
-
+ 
         # Détecter si c'est une consigne (début d'exercice)
         ex_type = detect_exercise_type(text) if text else "autre"
         is_consigne = ex_type != "autre" and len(text.split()) <= 15
-
+ 
         block = {
             "type": "paragraph",
             "text": text,
@@ -1670,7 +1446,7 @@ async def parse_document(file: UploadFile = File(...)):
             "alignment": str(para.alignment) if para.alignment else "left",
         }
         return block
-
+ 
     def process_table(table):
         rows = []
         table_images = []
@@ -1685,13 +1461,13 @@ async def parse_document(file: UploadFile = File(...)):
                     "images": cell_imgs
                 })
             rows.append(cells)
-
+ 
         # Détecter le type de tableau
         all_text = " ".join(
             cell["text"] for row in rows for cell in row
         ).lower()
         ex_type = detect_exercise_type(all_text)
-
+ 
         return {
             "type": "table",
             "rows": rows,
@@ -1700,17 +1476,17 @@ async def parse_document(file: UploadFile = File(...)):
             "num_cols": len(rows[0]) if rows else 0,
             "num_rows": len(rows)
         }
-
+ 
     # Parcourir les éléments du document dans l'ordre
     from docx.oxml.ns import qn as oxqn
     body = doc.element.body
-
+ 
     current_exercise = None
     exercise_blocks = []
-
+ 
     for child in body:
         tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
-
+ 
         if tag == "p":
             # Trouver le paragraphe correspondant
             para = None
@@ -1722,7 +1498,7 @@ async def parse_document(file: UploadFile = File(...)):
                 block = process_paragraph(para)
                 if block:
                     blocks.append(block)
-
+ 
         elif tag == "tbl":
             # Trouver le tableau correspondant
             for t in doc.tables:
@@ -1730,11 +1506,11 @@ async def parse_document(file: UploadFile = File(...)):
                     block = process_table(t)
                     blocks.append(block)
                     break
-
+ 
     # Grouper les blocs en exercices
     exercises = []
     current_ex = None
-
+ 
     for block in blocks:
         if block.get("is_consigne"):
             if current_ex:
@@ -1757,26 +1533,19 @@ async def parse_document(file: UploadFile = File(...)):
                     "blocks": [block],
                     "all_images": list(block.get("images", []))
                 })
-
+ 
     if current_ex:
         exercises.append(current_ex)
-
+ 
     return {
         "filename": filename,
         "num_exercises": len([e for e in exercises if e["exercise_type"] != "header"]),
         "num_images": img_counter[0],
         "exercises": exercises,
-        # V2.19 — LA ROUTE PRISE SE LIT. Un surcoût qu'on ne sait pas expliquer
-        # revient ; une perte qu'on ne signale pas non plus. Ces trois champs
-        # disent pourquoi ce document a été traité ainsi.
-        "route": "python-docx",
-        "cadres_caracteres": _perdus,
-        "cadres_extraits": _extraits,
-        **({"cadres_conversion_echouee": _conv_ko} if _conv_ko else {}),
         "raw_blocks": blocks  # Pour débogage
     }
-
-
+ 
+ 
 # ─────────────────────────────────────────────
 # ENDPOINT : /generate
 # Proxy Anthropic avec retry + chunking
@@ -1788,7 +1557,7 @@ async def parse_document(file: UploadFile = File(...)):
 import urllib.request
 import urllib.parse
 import unicodedata
-
+ 
 ARASAAC_API = "https://api.arasaac.org/v1/pictograms"
 ARASAAC_STATIC = "https://static.arasaac.org/pictograms/{id}/{id}_300.png"
 ARASAAC_CACHE_DIR = os.environ.get("ARASAAC_CACHE_DIR", os.path.join(tempfile.gettempdir(), "arasaac_cache"))
@@ -1796,12 +1565,12 @@ ARASAAC_TIMEOUT = 8
 ARASAAC_MAX_MOTS = 24
 ARASAAC_ATTRIBUTION = ("Pictogrammes : ARASAAC (arasaac.org) — auteur Sergio Palao, "
                        "propriété du Gouvernement d'Aragon, licence CC BY-NC-SA")
-
+ 
 _arasaac_ids: dict = {}      # "fr:araignée" -> id ARASAAC (ou -1 = introuvable, cache négatif)
 _arasaac_png: dict = {}      # id -> bytes PNG
-
+ 
 _ARASAAC_DETS = ("l'", "d'", "le ", "la ", "les ", "un ", "une ", "des ", "du ", "de ")
-
+ 
 def _arasaac_norm(mot: str) -> str:
     """Normalise un mot-clé : minuscules, espaces réduits, déterminant élidé."""
     m = (mot or "").strip().lower()
@@ -1811,17 +1580,17 @@ def _arasaac_norm(mot: str) -> str:
             m = m[len(det):]
             break
     return m.strip()
-
+ 
 def _arasaac_http_json(url: str):
     req = urllib.request.Request(url, headers={"User-Agent": "Tailory/2.9.2"})
     with urllib.request.urlopen(req, timeout=ARASAAC_TIMEOUT) as r:
         return json.loads(r.read().decode("utf-8"))
-
+ 
 def _arasaac_http_bytes(url: str) -> bytes:
     req = urllib.request.Request(url, headers={"User-Agent": "Tailory/2.9.2"})
     with urllib.request.urlopen(req, timeout=ARASAAC_TIMEOUT) as r:
         return r.read()
-
+ 
 def _arasaac_search_id(mot: str, lang: str):
     """bestsearch puis repli search ; retourne l'id du 1er pictogramme ou None."""
     q = urllib.parse.quote(mot)
@@ -1833,7 +1602,7 @@ def _arasaac_search_id(mot: str, lang: str):
         except Exception:
             continue
     return None
-
+ 
 def _arasaac_png_by_id(pid: int):
     """PNG 300 px d'un picto — cache mémoire puis disque puis réseau."""
     if pid in _arasaac_png:
@@ -1855,7 +1624,7 @@ def _arasaac_png_by_id(pid: int):
         f.write(b)
     _arasaac_png[pid] = b
     return b
-
+ 
 def _arasaac_resolve(mot: str, lang: str):
     """Mot → {id, dataurl} ou None. Caches négatifs inclus."""
     key = f"{lang}:{mot}"
@@ -1871,7 +1640,7 @@ def _arasaac_resolve(mot: str, lang: str):
     if b is None:
         return None
     return {"id": pid, "dataurl": "data:image/png;base64," + base64.b64encode(b).decode("ascii")}
-
+ 
 @app.post("/pictos")
 async def pictos(request: Request):
     """
@@ -1895,8 +1664,8 @@ async def pictos(request: Request):
             continue
         out[str(mot_brut)] = _arasaac_resolve(mot, lang)
     return {"pictos": out, "attribution": ARASAAC_ATTRIBUTION, "lang": lang}
-
-
+ 
+ 
 @app.post("/generate")
 async def generate(request: Request):
     """
@@ -1909,14 +1678,14 @@ async def generate(request: Request):
     api_key = body.get("api_key")
     if not api_key:
         raise HTTPException(400, "api_key requis")
-
+ 
     model = body.get("model", "claude-haiku-4-5-20251001")
     system = body.get("system", "")
     messages = body.get("messages", [])
     max_tokens = body.get("max_tokens", 6000)
-
+ 
     client = anthropic.Anthropic(api_key=api_key)
-
+ 
     # ══ v2.13 — LE CACHE SURVIT À LA DURÉE D'UNE PARTIE ═══════════════════════════════════
     # Constat des tirages (pied de page essai_10138) : « 10 009 lus + 0 relus +
     # 160 006 mis en cache » — on PAYE la mise en cache à chaque partie et on ne relit
@@ -1940,7 +1709,7 @@ async def generate(request: Request):
                 if isinstance(dernier, dict) and dernier.get("type") in ("text", "document", "image"):
                     dernier.setdefault("cache_control", {"type": "ephemeral"})
             break
-
+ 
     def _pose_ttl(duree):
         sys_blocs = [{"type": "text", "text": system,
                       "cache_control": {"type": "ephemeral"}}] if system else []
@@ -1954,12 +1723,12 @@ async def generate(request: Request):
             else:
                 b["cache_control"] = {"type": "ephemeral"}
         return sys_blocs
-
+ 
     # v2.13 — le client peut IMPOSER la durée ("cache_ttl": "5m" ou "1h") : le
     # frontend sait mieux que le serveur si plusieurs parties sont probables
     # (taille du document). Valeur absente ou inconnue : durée longue par défaut.
     duree_cache = body.get("cache_ttl") if body.get("cache_ttl") in ("5m", "1h") else "1h"
-
+ 
     # Retry avec backoff exponentiel
     max_retries = 3
     for attempt in range(max_retries):
@@ -2005,8 +1774,8 @@ async def generate(request: Request):
             raise HTTPException(400, f"Prompt trop long ou invalide : {e}")
         except Exception as e:
             raise HTTPException(500, f"Erreur API : {e}")
-
-
+ 
+ 
 # ─────────────────────────────────────────────
 # ENDPOINT : /export
 # Structure JSON adaptée → DOCX
@@ -2023,14 +1792,14 @@ async def export_docx(request: Request):
     body = await request.json()
     exercises = body.get("exercises", [])
     filename = body.get("filename", "tailory_adapte.docx")
-
+ 
     doc = DocxDocument()
-
+ 
     # Style de base
     style = doc.styles["Normal"]
     style.font.name = "Andika"
     style.font.size = Pt(12)
-
+ 
     def add_image_to_para(para, img_data: str):
         """Ajoute une image base64 à un paragraphe."""
         if not img_data or not img_data.startswith("data:"):
@@ -2043,26 +1812,26 @@ async def export_docx(request: Request):
             run.add_picture(img_stream, width=Inches(1.5))
         except Exception:
             pass
-
+ 
     def add_exercise_header(title: str, num: int):
         para = doc.add_paragraph()
         run = para.add_run(f"Exercice {num} — {title.upper()}")
         run.bold = True
         run.font.size = Pt(10)
         run.font.color.rgb = RGBColor(0x6e, 0xb7, 0x9e)
-
+ 
     def add_consigne(text: str):
         para = doc.add_paragraph()
         run = para.add_run(text)
         run.bold = True
         run.font.size = Pt(13)
-
+ 
     def add_response_line(label: str = ""):
         para = doc.add_paragraph()
         if label:
             para.add_run(f"{label} ").bold = True
         para.add_run("_" * 20)
-
+ 
     def build_relier_table(images, words):
         """Template fixe pour exercice relier : image | • | mot"""
         if not words:
@@ -2083,29 +1852,29 @@ async def export_docx(request: Request):
             # Colonne mot
             row.cells[2].text = word
             row.cells[2].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.LEFT
-
+ 
     ex_num = 0
     for exercise in exercises:
         ex_type = exercise.get("exercise_type", "autre")
         consigne = exercise.get("adapted_consigne") or exercise.get("consigne", "")
         blocks = exercise.get("adapted_blocks") or exercise.get("blocks", [])
         images = exercise.get("all_images", [])
-
+ 
         if ex_type == "header":
             for block in blocks:
                 if block.get("text"):
                     doc.add_paragraph(block["text"])
             continue
-
+ 
         ex_num += 1
-
+ 
         # En-tête exercice
         add_exercise_header(ex_type, ex_num)
-
+ 
         # Consigne
         if consigne:
             add_consigne(consigne)
-
+ 
         # Corps selon le type d'exercice
         if ex_type == "relier":
             # Extraire les mots de la colonne droite depuis les blocs
@@ -2115,7 +1884,7 @@ async def export_docx(request: Request):
                 and len(b["text"].split()) <= 4
             ]
             build_relier_table(images, words)
-
+ 
         elif ex_type in ("compléter", "numéroter"):
             for block in blocks:
                 if block.get("is_consigne"):
@@ -2137,7 +1906,7 @@ async def export_docx(request: Request):
                         para = doc.add_paragraph()
                         for img in block["images"][:2]:
                             add_image_to_para(para, img["data"])
-
+ 
         elif ex_type == "classer":
             # Tableau découpe compact
             all_items = [
@@ -2150,7 +1919,7 @@ async def export_docx(request: Request):
                 for i, item in enumerate(all_items):
                     t.rows[i].cells[0].text = str(i + 1)
                     t.rows[i].cells[1].text = ""  # case réponse
-
+ 
         else:
             # Fallback : texte + images
             for block in blocks:
@@ -2161,22 +1930,22 @@ async def export_docx(request: Request):
                 for img in block.get("images", [])[:2]:
                     para = doc.add_paragraph()
                     add_image_to_para(para, img["data"])
-
+ 
         # Séparateur
         doc.add_paragraph("─" * 30)
-
+ 
     # Sauvegarder et retourner
     buf = io.BytesIO()
     doc.save(buf)
     buf.seek(0)
-
+ 
     return StreamingResponse(
         buf,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'}
     )
-
-
+ 
+ 
 # ─────────────────────────────────────────────
 # ENDPOINT : /convert (existant — conservé)
 # PDF → DOCX
@@ -2185,11 +1954,11 @@ async def export_docx(request: Request):
 async def convert_pdf(file: UploadFile = File(...)):
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(400, "Format PDF requis")
-
+ 
     uid = str(uuid.uuid4())[:8]
     pdf_path = f"/tmp/{uid}.pdf"
     docx_path = f"/tmp/{uid}.docx"
-
+ 
     try:
         content = await file.read()
         with open(pdf_path, "wb") as f:
@@ -2208,13 +1977,13 @@ async def convert_pdf(file: UploadFile = File(...)):
         for p in [pdf_path, docx_path]:
             if os.path.exists(p):
                 os.remove(p)
-
-
+ 
+ 
 # ─────────────────────────────────────────────
 # ENDPOINT : /health
 # ─────────────────────────────────────────────
 _arasaac_probe_cache = {"t": 0.0, "state": "unknown"}
-
+ 
 @app.get("/health")
 def health():
     # V2.9.2 — sonde ARASAAC (mise en cache 10 min : /health est appelé à chaque
@@ -2230,18 +1999,14 @@ def health():
     # V2.10 — la version du module grilles est remontée telle qu'elle est
     # DANS le fichier déployé, jamais recopiée à la main : c'est ce qui
     # permet de savoir, en ligne, laquelle tourne vraiment.
-    _pol = polices_manquantes()
-    return {"status": "ok", "version": "2.19",
-            # V2.18 — une troncature de cadre s'explique par une police absente ;
-            # le serveur le dit au lieu de laisser deviner.
-            "polices_manquantes": _pol or "aucune",
+    return {"status": "ok", "version": "2.17",
             "grilles": (getattr(_grilles, "VERSION", "inconnue")
                         if GRILLES_ACTIVES else "absent"),
             "formes": (getattr(_formes, "VERSION", "inconnue")
                        if FORMES_ACTIVES else "absent"),
             "arasaac": _arasaac_probe_cache["state"]}
-
-
+ 
+ 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
