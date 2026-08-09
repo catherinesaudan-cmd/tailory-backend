@@ -1,15 +1,23 @@
 """
-Tailory Backend V2.17 — Pipeline documentaire pédagogique
+Tailory Backend V2.19 — Pipeline documentaire pédagogique
+
+⚠ LA VERSION SE DÉCLARE ICI ET DANS /health, ET LES DEUX DOIVENT CONCORDER.
+  Relevé de Catherine, 09.08.2026 : l'en-tête disait encore V2.17 quand /health
+  répondait 2.19. Deux sources de vérité pour la même chose — c'est précisément
+  ce que le projet interdit (§ 2.4). La batterie le vérifie désormais.
 FastAPI + python-docx + pdf2docx + Anthropic proxy + pictogrammes ARASAAC
 
 Endpoints:
   POST /pictos   → résolution de mots-clés en pictogrammes ARASAAC (base64)
                    (chantier prioritaire validé : supports visuels du mode
                     Participation — non-lecteur, non-verbal/CAA, allophone)
-  POST /parse    → DOCX/PDF/ODT → structure JSON pédagogique
-                   (ODT : converti en PDF via LibreOffice puis pipeline PDF —
-                    indispensable car les ODT contiennent souvent des formes
-                    vectorielles natives invisibles pour l'extracteur DOCX)
+  POST /parse    → DOCX/PDF/ODT/DOC/RTF/… → structure JSON pédagogique
+                   (formats bureautiques : convertis en PDF via LibreOffice puis
+                    pipeline PDF — indispensable car ils contiennent souvent des
+                    formes vectorielles natives invisibles à l'extracteur DOCX.
+                    V2.19 : un DOCX dont le contenu est enfermé dans des cadres
+                    emprunte la même route ; les autres gardent la route texte,
+                    qui ne coûte rien.)
   POST /generate → proxy Anthropic avec retry + chunking
   POST /export   → structure JSON adaptée → DOCX
   POST /convert  → PDF → DOCX (existant, conservé)
@@ -1089,6 +1097,49 @@ def parse_pdf(content: bytes, filename: str):
                             letters += sum(1 for ch in w[4] if ch.isalpha())
                     if letters >= 3:
                         continue
+                # ══ V2.18 — LE CLIP EMPORTE LES REPÈRES QUI DÉSIGNENT LA FIGURE ══
+                # DÉFAUT RELEVÉ PAR CATHERINE (09.08.2026, trace écrite « Le
+                # Cercle ») : sur la figure du cercle, les repères A, B et C ne
+                # sont pas visibles dans l'image reprise. Mesuré : le clip
+                # s'arrête à la zone du TRACÉ — (67,274)–(237,444) — et les
+                # lettres sont des caractères de PAGE posés à côté. A est à
+                # cheval, B et C tombent dehors de 16 points. Seuls O et r,
+                # à l'intérieur du cercle, survivaient : 3 repères perdus sur 5.
+                #
+                # Une figure amputée de ses repères ne dit plus rien : « le
+                # segment [BC] est un diamètre » renvoie à des lettres absentes.
+                #
+                # PANEL (§ 2.2) sur deux documents réels de Catherine, 5 figures :
+                #   sans marge (l'existant)   11 repères · 97 mots de phrase avalés
+                #   marge fixe de 20 pt       16 repères · 100 mots avalés
+                #   marge de 8 %              14 repères · 101 mots avalés
+                #   CELUI-CI                  18 repères ·  97 mots avalés
+                # Les marges aveugles gagnent des repères et avalent du texte de
+                # leçon en prime — gravé dans une image, il devient illisible et
+                # non modifiable. Ici, AUCUNE marge : le clip s'étend jusqu'aux
+                # repères, et à eux seuls. Ce qui entre est nommé.
+                #
+                # RECONNAISSANCE PAR LA FORME (un mot d'une à trois lettres à
+                # moins de 24 pt du tracé) : PROVISOIRE PAR CONSTRUCTION — elle
+                # se trompera un jour sur un mot court légitime. Mesurée sur
+                # 5 figures : 0 mot de phrase avalé de plus que l'existant.
+                if not is_thin:
+                    voisin = fitz.Rect(clip.x0 - 24, clip.y0 - 24,
+                                       clip.x1 + 24, clip.y1 + 24) & page.rect
+                    etendu = fitz.Rect(clip)
+                    for w in page_words:
+                        t = (w[4] or "").strip()
+                        if not t or len(t) > 4:
+                            continue
+                        if not _EST_REPERE.match(t):
+                            continue
+                        wr = fitz.Rect(w[:4])
+                        if (wr & voisin).is_empty:
+                            continue
+                        etendu |= wr
+                    if etendu != clip:
+                        clip = fitz.Rect(etendu.x0 - 2, etendu.y0 - 2,
+                                         etendu.x1 + 2, etendu.y1 + 2) & page.rect
                 pix = page.get_pixmap(clip=clip, matrix=fitz.Matrix(2, 2))
                 if pix.width < 8 or pix.height < 8:
                     continue
@@ -1267,6 +1318,146 @@ FORMATS_BUREAUTIQUES = ("odt", "doc", "rtf", "ott", "fodt", "sxw", "wps", "abw")
 # qui seraient PERDUES en ODT→DOCX (DrawingML non extrait), alors que le
 # pipeline PDF/PyMuPDF les récupère comme figures via get_drawings().
 # ─────────────────────────────────────────────
+# ── V2.18 — CE QU'EST UN REPÈRE DE FIGURE ────────────────────────────────────
+# Une à trois lettres ou chiffres isolés : A, B, C, O, r, (d1), 12. C'est ce qui
+# DÉSIGNE une figure sans en faire partie — le clip de rasterisation doit les
+# emporter, sinon la figure arrive muette. Déclaré ici, une seule fois.
+# ── V2.18 — LES POLICES DE WORD, ET POURQUOI ELLES COMPTENT ──────────────────
+# DÉFAUT RELEVÉ PAR CATHERINE (09.08.2026) : « les mots rayon et centre sont
+# coupés du premier schéma ». Mesuré sur la trace écrite « Le Cercle » : les
+# étiquettes sortent en « Rayo » et « Cemt » — coupées DÈS LA CONVERSION, avant
+# toute extraction. Le document demande CENTURY GOTHIC ; le serveur ne l'a pas,
+# LibreOffice substitue DejaVu Sans, mesurée 12 % PLUS LARGE. Le texte déborde
+# de sa zone et le cadre le rogne. Aucun code applicatif ne peut récupérer des
+# lettres qui n'ont jamais été tracées.
+#
+# Le document en demande sept : Arial, Times New Roman, Courier New, Verdana,
+# Symbol, Wingdings, Century Gothic. Les Liberation (déjà installées) portent
+# les métriques EXACTES d'Arial, Times et Courier — ces trois-là vont bien.
+# Manquent : Century Gothic (équivalent métrique libre : URW Gothic), et selon
+# les documents Verdana (DejaVu Sans est proche) et les polices de symboles.
+#
+# LE REMÈDE VIT DANS LE DOCKERFILE, PAS ICI :
+#     apt-get install -y fonts-urw-base35 fonts-liberation \
+#                        fonts-crosextra-carlito fonts-crosextra-caladea
+#   + la table de substitution métrique 99-tailory-word.conf (fournie).
+# ÉPROUVÉ ICI : sans la table, Century Gothic devenait DejaVu Sans ; avec elle,
+# URW Gothic. Reconversion du document de Catherine : le corps du texte passe
+# de DejaVu à URWGothic-Book — 27 fragments sur 63.
+#
+# ⚠ LIMITE DÉCLARÉE, ET ELLE EST NETTE. Les DEUX étiquettes du compas restent
+# tronquées après ce remède : mesuré, elles ne sont PAS en Century Gothic mais
+# dans une police que fontconfig ne sait pas mieux mapper — elles sortent en
+# DejaVu Sans, où « Centre » mesure 54 points pour une boîte de 43. Aucune des
+# substitutions libres disponibles n'est assez étroite : Verdana 54, Century
+# Gothic 53, Arial 48 — toutes au-dessus de 43. Word, lui, rétrécit le texte
+# pour le faire tenir ; LibreOffice le rogne.
+# Ce volet AMÉLIORE le rendu général et NOMME la cause ; il ne répare pas ces
+# deux étiquettes-là. Le signalement à la fiche reste donc dû, et il existe.
+#
+# La sonde ci-dessous ne répare rien : elle DIT ce qui manque, pour qu'une
+# troncature ne soit plus attribuée au hasard. Un défaut qu'on ne sait pas
+# nommer revient (§ 1.1).
+POLICES_ATTENDUES = {
+    "Century Gothic": ("URW Gothic", "fonts-urw-base35"),
+    "Arial": ("Liberation Sans", "fonts-liberation"),
+    "Times New Roman": ("Liberation Serif", "fonts-liberation"),
+    "Courier New": ("Liberation Mono", "fonts-liberation"),
+    "Calibri": ("Carlito", "fonts-crosextra-carlito"),
+    "Cambria": ("Caladea", "fonts-crosextra-caladea"),
+}
+
+
+def polices_manquantes():
+    """Quelles substitutions de police risquent de tronquer un cadre ?
+
+    Rend la liste des polices Word dont AUCUN équivalent métrique n'est installé.
+    Une substitution par une police plus large rogne les zones de texte.
+    """
+    try:
+        import subprocess
+        installees = subprocess.run(["fc-list", "--format", "%{family}\n"],
+                                    capture_output=True, text=True, timeout=10).stdout
+    except Exception:
+        return ["(fc-list injoignable)"]
+    manque = []
+    for word, (equiv, paquet) in POLICES_ATTENDUES.items():
+        if equiv.lower() not in installees.lower():
+            manque.append(f"{word} → {equiv} absente ({paquet})")
+    return manque
+
+
+# ── V2.19 — UN DOCX DONT LE CONTENU EST ENFERMÉ DANS DES CADRES ──────────────
+# DÉFAUT MESURÉ le 09.08 sur deux .docx réels de Catherine. Word permet de poser
+# du texte dans des CADRES flottants (zones de texte) : titres, objectifs,
+# encadrés de leçon, étiquettes de schéma, onglets latéraux. Les modèles de
+# fiches téléchargés par les enseignantes en sont bâtis. python-docx ne les voit
+# PAS — il ne lit que le texte courant.
+#
+#   trace écrite « solides »        : 14 cadres, contenu INVISIBLE au flux,
+#                                     1 500 caractères perdus — le document
+#                                     sortait à ZÉRO caractère ;
+#   exercices « droites parallèles » : 52 cadres invisibles, 1 636 caractères,
+#                                     dont « Savoir identifier et tracer deux
+#                                     droites parallèles » — l'OBJECTIF de la
+#                                     fiche. Le modèle adaptait à l'aveugle.
+#
+# LE REMÈDE N'EST PAS DE TOUT BASCULER. Arbitrage de Catherine, 09.08 : la route
+# LibreOffice fait VOIR la page au modèle, donc elle coûte — mesuré, de 3 % du
+# prix d'une génération pour une page à ~13 % pour treize. On ne le paie que
+# pour les documents qui en ont besoin.
+#
+# LE CRITÈRE NE COMPTE PAS LES CADRES, IL COMPTE CE QUI MANQUERAIT. Un cadre
+# décoratif, ou dont le texte se retrouve dans le flux, ne déclenche rien. Seul
+# compte le contenu QU'ON NE LIRAIT NULLE PART AILLEURS.
+#
+# Lecture directe du XML, sans conversion : quelques millisecondes.
+# RECONNAISSANCE PAR LA FORME (balise w:txbxContent) : c'est une DÉCLARATION du
+# format Word, pas une liste de mots — durable (§ 2.1).
+# LE SEUIL SE MESURE, IL NE SE CHOISIT PAS (§ 2.2). Panel sur les trois témoins,
+# avec la réponse attendue écrite AVANT : 0 → 2/3 (le témoin ordinaire bascule
+# pour rien) · 50 · 120 · 300 → 3/3 · 500 → 2/3 · 800 et au-delà → 1/3.
+# Le palier juste va de 50 à 300 ; 120 est pris au milieu, à distance des deux
+# bords. Mesures : solides 750 caractères, droites parallèles 411, témoin 0.
+# ⚠ TROIS documents, dont un construit. Le seuil se revoit dès qu'un lot réel
+# de .docx d'enseignantes est disponible — c'est la mesure qui manque.
+SEUIL_CADRES_CAR = 120
+
+
+def _sans_espaces(t: str) -> str:
+    return re.sub(r"[^a-zàâéèêëîïôûùüçA-ZÀÂÉÈÊËÎÏÔÛÙÜÇ]", "", (t or "")).lower()
+
+
+def docx_contenu_en_cadres(content: bytes, flux: str):
+    """Combien de caractères sont enfermés dans des cadres et introuvables ailleurs ?
+
+    Rend (nb_caracteres_perdus, [extraits]). Le flux est le texte que python-docx
+    sait déjà lire : ce qui s'y retrouve n'est pas perdu.
+    """
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as z:
+            xml = z.read("word/document.xml").decode("utf-8", "replace")
+    except Exception:
+        return 0, []
+    cf = _sans_espaces(flux)
+    perdus, extraits, vus = 0, [], set()
+    for bloc in re.findall(r"<w:txbxContent>(.*?)</w:txbxContent>", xml, re.S):
+        t = "".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t>", bloc)).strip()
+        if not t or t in vus:
+            continue
+        vus.add(t)
+        c = _sans_espaces(t)
+        if not c or c[:20] in cf:
+            continue          # ce texte est déjà lisible dans le flux
+        perdus += len(t)
+        if len(extraits) < 5:
+            extraits.append(re.sub(r"\s+", " ", t)[:70])
+    return perdus, extraits
+
+
+_EST_REPERE = re.compile(r"^[A-Za-z]\d?$|^\(?[dD]\d\)?$|^\d{1,3}$")
+
+
 def convert_office_to_pdf(content: bytes, ext: str):
     """
     Convertit un document bureautique (odt, doc, rtf…) en PDF via LibreOffice.
@@ -1369,6 +1560,39 @@ async def parse_document(file: UploadFile = File(...)):
         doc = DocxDocument(io.BytesIO(content))
     except Exception as e:
         raise HTTPException(400, f"Impossible de lire le document : {e}")
+
+    # ══ V2.19 — LE DOCX DONT LE CONTENU EST EN CADRES PREND LA ROUTE PDF ══════
+    # Le texte courant seul ne dit pas tout de ce document : on mesure ce qui
+    # resterait invisible, et on ne convertit QUE si la perte est réelle.
+    # Voir le commentaire de docx_contenu_en_cadres.
+    if ext == "docx":
+        _flux = "\n".join(p.text for p in doc.paragraphs)
+        for _t in doc.tables:
+            for _r in _t.rows:
+                _flux += "\n" + " ".join(c.text for c in _r.cells)
+        _perdus, _extraits = docx_contenu_en_cadres(content, _flux)
+        if _perdus >= SEUIL_CADRES_CAR:
+            pdf_bytes, conv_err = convert_office_to_pdf(content, "docx")
+            if pdf_bytes is not None:
+                result = parse_pdf(pdf_bytes, filename)
+                result["source_format"] = "docx"
+                # POURQUOI cette route a été prise : l'enseignante et le journal
+                # doivent pouvoir le lire, sinon le surcoût est inexplicable.
+                result["route"] = "libreoffice"
+                result["cadres_caracteres"] = _perdus
+                result["cadres_extraits"] = _extraits
+                if len(pdf_bytes) * 4 / 3 < PDF_B64_MAX:
+                    result["pdf_b64"] = base64.b64encode(pdf_bytes).decode()
+                else:
+                    result["pdf_b64_skipped_bytes"] = len(pdf_bytes)
+                return result
+            # Conversion impossible : on NE BLOQUE PAS un format qui marchait.
+            # La route habituelle reprend, et le manque est signalé.
+            _conv_ko = conv_err
+        else:
+            _conv_ko = ""
+    else:
+        _perdus, _extraits, _conv_ko = 0, [], ""
 
     # Extraire toutes les images du document.
     # Les images web (png/jpeg/…) sont encodées telles quelles ; les formats
@@ -1542,6 +1766,13 @@ async def parse_document(file: UploadFile = File(...)):
         "num_exercises": len([e for e in exercises if e["exercise_type"] != "header"]),
         "num_images": img_counter[0],
         "exercises": exercises,
+        # V2.19 — LA ROUTE PRISE SE LIT. Un surcoût qu'on ne sait pas expliquer
+        # revient ; une perte qu'on ne signale pas non plus. Ces trois champs
+        # disent pourquoi ce document a été traité ainsi.
+        "route": "python-docx",
+        "cadres_caracteres": _perdus,
+        "cadres_extraits": _extraits,
+        **({"cadres_conversion_echouee": _conv_ko} if _conv_ko else {}),
         "raw_blocks": blocks  # Pour débogage
     }
 
@@ -1999,7 +2230,11 @@ def health():
     # V2.10 — la version du module grilles est remontée telle qu'elle est
     # DANS le fichier déployé, jamais recopiée à la main : c'est ce qui
     # permet de savoir, en ligne, laquelle tourne vraiment.
-    return {"status": "ok", "version": "2.17",
+    _pol = polices_manquantes()
+    return {"status": "ok", "version": "2.19",
+            # V2.18 — une troncature de cadre s'explique par une police absente ;
+            # le serveur le dit au lieu de laisser deviner.
+            "polices_manquantes": _pol or "aucune",
             "grilles": (getattr(_grilles, "VERSION", "inconnue")
                         if GRILLES_ACTIVES else "absent"),
             "formes": (getattr(_formes, "VERSION", "inconnue")
