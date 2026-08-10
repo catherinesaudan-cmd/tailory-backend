@@ -1,5 +1,8 @@
 """
-Tailory Backend V2.18 — Pipeline documentaire pédagogique
+Tailory Backend — Pipeline documentaire pédagogique
+(numéro de version : UNE seule déclaration, la constante VERSION ci-dessous —
+ l'en-tête n'en porte plus ; voir JOURNAL BACKEND v2.23, défaut de livraison
+ « le fichier annonçait 2.18 »)
 FastAPI + python-docx + pdf2docx + Anthropic proxy + pictogrammes ARASAAC
 
 Endpoints:
@@ -207,6 +210,11 @@ from pdf2docx import Converter
 # Doit rester égal à PDF_B64_MAX du frontend (tailoryv10_62.html) : un plafond
 # plus bas ici filtrerait en amont, invisiblement, quoi que fasse le frontend.
 PDF_B64_MAX = 4_000_000  # ~3 Mo de PDF, une trentaine de pages illustrées
+
+# Seule déclaration du numéro de version du backend. /health la LIT — jamais
+# recopiée à la main ailleurs (même règle que pour grilles/formes ci-dessous).
+# (voir JOURNAL BACKEND v2.23)
+VERSION = "2.23"
 
 app = FastAPI(title="Tailory Backend V2")
 
@@ -2745,7 +2753,7 @@ def health():
     # V2.10 — la version du module grilles est remontée telle qu'elle est
     # DANS le fichier déployé, jamais recopiée à la main : c'est ce qui
     # permet de savoir, en ligne, laquelle tourne vraiment.
-    return {"status": "ok", "version": "2.18",
+    return {"status": "ok", "version": VERSION,
             "grilles": (getattr(_grilles, "VERSION", "inconnue")
                         if GRILLES_ACTIVES else "absent"),
             "formes": (getattr(_formes, "VERSION", "inconnue")
