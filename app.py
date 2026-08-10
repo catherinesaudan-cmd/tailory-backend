@@ -214,7 +214,7 @@ PDF_B64_MAX = 4_000_000  # ~3 Mo de PDF, une trentaine de pages illustrées
 # Seule déclaration du numéro de version du backend. /health la LIT — jamais
 # recopiée à la main ailleurs (même règle que pour grilles/formes ci-dessous).
 # (voir JOURNAL BACKEND v2.23)
-VERSION = "2.27"
+VERSION = "2.26"
 
 app = FastAPI(title="Tailory Backend V2")
 
@@ -997,70 +997,6 @@ def pages_de_corrige(doc):
     return flag
 
 
-
-# ══ V2.27 — LE TEXTE PORTE SES FIGURES : TISSAGE DES MARQUEURS ═══════════════
-# Défaut mesuré (reprise 71, huit tirages) : pour un PDF, le texte partait SANS
-# marqueur — le modèle plaçait les figures en DEVINANT depuis les miniatures
-# (6 posées un soir, 4 le lendemain, 1/17 un mauvais jour, numéros inventés).
-# Remède : chaque figure de CONTENU (non-décor, sans mots de tâche) insère
-# [TAILORY_IMG_N] dans le texte, juste après la ligne source qui la précède.
-# L'ancre livre aussi la frontière : ancrée AVANT le premier exercice = figure
-# d'en-tête, jamais exigée. (voir JOURNAL BACKEND v2.27)
-def _v27_tisser_marqueurs(texte_page, page, figs_page):
-    """Insère [TAILORY_IMG_N] après la ligne source qui précède chaque figure.
-    Appariement par TEXTE NORMALISÉ avec carte d'offsets : les marques de gras
-    (⟦gras⟧) et les espaces multiples ne cassent plus la recherche."""
-    lignes = [(b[1], b[3], (b[4] or "").strip())
-              for b in page.get_text("blocks") if (b[4] or "").strip()]
-
-    # texte normalisé + carte : position normalisée → position réelle
-    norm_chars, carte = [], []
-    i = 0
-    GO, GF = "\u27e6gras\u27e7", "\u27e6/gras\u27e7"
-    while i < len(texte_page):
-        if texte_page.startswith(GO, i):
-            i += len(GO); continue
-        if texte_page.startswith(GF, i):
-            i += len(GF); continue
-        c = texte_page[i]
-        if c.isspace():
-            if norm_chars and norm_chars[-1] != " ":
-                norm_chars.append(" "); carte.append(i)
-        else:
-            norm_chars.append(c); carte.append(i)
-        i += 1
-    norm = "".join(norm_chars)
-
-    def _cle(s):
-        return " ".join(s.replace(GO, "").replace(GF, "").split())
-
-    inserts = []
-    for idx, br in figs_page:
-        avant = [l for l in lignes if l[1] <= br.y0 + 4]
-        pos_reel = None
-        anc_j = "<t\u00eate de page>"
-        if avant:
-            anc = min(avant, key=lambda l: br.y0 - l[1])[2]
-            anc_j = _cle(anc)[:60]
-            frag = _cle(anc)[-42:]
-            p = norm.find(frag)
-            if p >= 0:
-                fin_frag = p + len(frag) - 1
-                pos_reel = carte[fin_frag] + 1
-                # aller au bout de la ligne réelle
-                nl = texte_page.find("\n", pos_reel)
-                pos_reel = nl if nl >= 0 else len(texte_page)
-        if pos_reel is None:
-            pos_reel = 0
-        inserts.append((pos_reel, idx, anc_j))
-
-    out = texte_page
-    for pos, idx, anc in sorted(inserts, key=lambda x: (-x[0], x[1])):
-        out = out[:pos] + ("\n[TAILORY_IMG_%d]" % idx) + out[pos:]
-    return out, [{"index": idx, "ancre": anc} for _, idx, anc in
-                 sorted(inserts, key=lambda x: x[1])]
-
-
 def parse_pdf(content: bytes, filename: str):
     """
     Extrait d'un PDF, dans l'ordre de lecture :
@@ -1075,7 +1011,6 @@ def parse_pdf(content: bytes, filename: str):
     doc = fitz.open(stream=content, filetype="pdf")
     images = []
     full_text = []
-    marqueurs_tisses = []   # V2.27
     grilles_inventaire = []
     formes_inventaire = []
     idx = 0
@@ -1397,7 +1332,6 @@ def parse_pdf(content: bytes, filename: str):
                     # wagon) vaut plus que la règle (arbitrage du 10.08, K.5).
                     **({"mots_taches": _mots_clip} if _mots_clip >= 6 else {}),
                     **({"decor_probable": True} if _decor_ else {}),
-                    "_v27_rect": [clip.x0, clip.y0, clip.x1, clip.y1],
                     "index": idx,
                     "page": pno + 1,
                     "data": f"data:image/png;base64,{b64}",
@@ -1436,25 +1370,12 @@ def parse_pdf(content: bytes, filename: str):
                 "aire_refusee": f["aire_refusee"],
             })
 
-        # V2.27 — figures de CONTENU de cette page (non-décor, sans mots)
-        figs27 = [(im["index"], fitz.Rect(im["_v27_rect"]))
-                  for im in images
-                  if im.get("page") == pno + 1 and "_v27_rect" in im
-                  and not im.get("decor_probable") and not im.get("mots_taches")]
-        texte_page, tisses27 = _v27_tisser_marqueurs(texte_page, page, figs27)
-        marqueurs_tisses.extend(tisses27)
         full_text.append(texte_page)
 
     doc.close()
-    for _im in images:
-        _im.pop("_v27_rect", None)   # V2.27 — outil interne, ne part pas au front
     return {
         "filename": filename,
         "pdf_mode": True,
-        # V2.27 — la liste des figures TISSÉES (contenu) : la vérité opposable
-        # du poseur frontend — chaque index ici DOIT finir posé, ou bloquer.
-        "figures_contenu": sorted(t["index"] for t in marqueurs_tisses),
-        "marqueurs_tisses": marqueurs_tisses,
         # V2.20 — pages écartées comme corrigé, DÉCLARÉES (jamais en silence)
         "corrige_pages": sorted(corrige),
         # V2.21 — zones de production déclarées + réceptacles écartés, comptés
