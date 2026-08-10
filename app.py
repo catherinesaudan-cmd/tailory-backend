@@ -214,7 +214,7 @@ PDF_B64_MAX = 4_000_000  # ~3 Mo de PDF, une trentaine de pages illustrées
 # Seule déclaration du numéro de version du backend. /health la LIT — jamais
 # recopiée à la main ailleurs (même règle que pour grilles/formes ci-dessous).
 # (voir JOURNAL BACKEND v2.23)
-VERSION = "2.23"
+VERSION = "2.24"
 
 app = FastAPI(title="Tailory Backend V2")
 
@@ -628,7 +628,12 @@ def _v21_rect_au_trait(d):
         elif t == "c":
             bb = fitz.Rect(min(p.x for p in it[1:]), min(p.y for p in it[1:]),
                            max(p.x for p in it[1:]), max(p.y for p in it[1:]))
-            if max(bb.width, bb.height) > 0.15 * petit:
+            # V2.24 — le coin se juge AUSSI en absolu : un rayon de coin est un
+            # trait d'auteur (~20-23 pt mesurés), il ne grandit pas avec le cadre.
+            # Le seul relatif (15 %) refusait les cadres bas du PDF source exact
+            # (22,8 pt > 20,5) et fabriquait la capture collée du tirage 10366_8.
+            # (voir JOURNAL BACKEND v2.24)
+            if max(bb.width, bb.height) > max(0.15 * petit, 25.0):
                 return False
         elif t == "re":
             continue
