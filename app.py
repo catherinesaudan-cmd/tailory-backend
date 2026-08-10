@@ -214,7 +214,7 @@ PDF_B64_MAX = 4_000_000  # ~3 Mo de PDF, une trentaine de pages illustrées
 # Seule déclaration du numéro de version du backend. /health la LIT — jamais
 # recopiée à la main ailleurs (même règle que pour grilles/formes ci-dessous).
 # (voir JOURNAL BACKEND v2.23)
-VERSION = "2.24"
+VERSION = "2.25"
 
 app = FastAPI(title="Tailory Backend V2")
 
@@ -665,7 +665,14 @@ def _v21_classe_grands_traces(page):
         tirets = bool(d.get("dashes")) and str(d.get("dashes")).strip() not in ("", "[] 0")
         if r.get_area() >= 8000 and contenus >= 3 and tirets:
             englobants.add(i)
-        elif contenus == 0 and r.get_area() >= 2000:
+        # V2.25 — UNE ZONE S'ANNONCE EN POINTILLÉS (miroir du verrou des tissus).
+        # Un rectangle PLEIN et vide est une FORME d'exercice (un rectangle est
+        # vide par nature) : mesuré le 10.08 soir, la règle sans tirets avalait
+        # le rectangle long de l'évaluation (47×9 mm, absent du tirage 10367),
+        # 8 formes des fiches 7a et les réceptacles du CP (7 fausses zones).
+        # Panel § 2.2 : taille-plancher, voisinage, cadre-parent mesurés et
+        # écartés. (voir JOURNAL BACKEND v2.25)
+        elif contenus == 0 and r.get_area() >= 2000 and tirets:
             import re as _re
             mots = len(_re.findall(r"[A-Za-zàâçéèêëîïôöûüù]{2,}",
                                    page.get_text(clip=r)))
