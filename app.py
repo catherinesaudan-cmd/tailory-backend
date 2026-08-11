@@ -214,7 +214,7 @@ PDF_B64_MAX = 4_000_000  # ~3 Mo de PDF, une trentaine de pages illustrées
 # Seule déclaration du numéro de version du backend. /health la LIT — jamais
 # recopiée à la main ailleurs (même règle que pour grilles/formes ci-dessous).
 # (voir JOURNAL BACKEND v2.23)
-VERSION = "2.32"
+VERSION = "2.33"
 # v2.28 — LE SERVEUR SIGNE SON CONTENU, PAS SEULEMENT SON NOM (11.08.2026).
 # Condition : le module se charge. Effet : l'empreinte du fichier lui-même est
 # calculée UNE fois et servie par /health. Une étiquette n'est pas le code (leçon
@@ -742,7 +742,10 @@ def _collect_page_regions(page):
     for img in page.get_images(full=True):
         try:
             for rect in page.get_image_rects(img[0]):
-                if rect.width > 12 and rect.height > 12:
+                # v2.33 — une image collée a été posée EXPRÈS : son plancher
+                # est celui du résidu invisible (8 pt), jamais celui des traits.
+                # (voir JOURNAL BACKEND v2.33)
+                if rect.width > 8 and rect.height > 8:
                     if rect.width * rect.height > 0.85 * page_area:
                         continue  # image de fond pleine page
                     rasters.append(fitz.Rect(rect))
@@ -1153,7 +1156,14 @@ def parse_pdf(content: bytes, filename: str):
             if key in seen:
                 continue
             seen.add(key)
-            full = r.width >= 24 and r.height >= 24
+            # v2.33 — même doctrine en aval : le plancher des 24 pt a été
+            # calibré pour écarter les MIETTES DE TRAITS ; appliqué aux images
+            # il jetait les pions (23,6 × 35,1 pt, à 0,4 pt du seuil).
+            _img33 = any(not (ra & r).is_empty
+                         and (ra & r).get_area() >= 0.9 * min(ra.get_area(), r.get_area())
+                         for ra in rasters)
+            full = (r.width >= 8 and r.height >= 8) if _img33 else (
+                r.width >= 24 and r.height >= 24)
             slim = min(r.width, r.height) < 24 and (
                 max(r.width, r.height) >= 40 or key in cles_courts)
             if not (full or slim):
@@ -1193,6 +1203,27 @@ def parse_pdf(content: bytes, filename: str):
                     if not (cadre.contains(r)
                             or (not (r & cadre).is_empty
                                 and (r & cadre).get_area() >= 0.6 * r.get_area()))]
+            # v2.33 — LE CADRE SUIT LA SCÈNE, PAS LA TABLE. Condition : un objet
+            # (dessiné ou collé) touche la bande par le dessus ou le dessous, dans
+            # son emprise horizontale. Effet : le cadre l'emporte. Le jeu de 12 pt
+            # est mesuré : à 30 pt, deux bandes voisines fusionnent (témoin T5).
+            _haut33 = fitz.Rect(cadre.x0 - 3, cadre.y0 - 12, cadre.x1 + 3, cadre.y0)
+            _bas33 = fitz.Rect(cadre.x0 - 3, cadre.y1, cadre.x1 + 3, cadre.y1 + 12)
+            for _z33 in (_haut33, _bas33):
+                for _d33 in page.get_drawings():
+                    _r33 = _d33.get("rect")
+                    if not _r33:
+                        continue
+                    _o33 = fitz.Rect(_r33)
+                    if _o33.width < 4 or _o33.width > 250 or _o33.height < 3:
+                        continue
+                    if (_o33.intersects(_z33) and _o33.x0 >= cadre.x0 - 5
+                            and _o33.x1 <= cadre.x1 + 5):
+                        cadre = cadre | _o33
+                for _ra33 in rasters:
+                    if (_ra33.intersects(_z33) and not (_ra33 & cadre).is_empty
+                            and _ra33.x0 >= cadre.x0 - 5 and _ra33.x1 <= cadre.x1 + 5):
+                        cadre = cadre | _ra33
             cadres_grille.add((round(cadre.x0, 1), round(cadre.y0, 1),
                                round(cadre.x1, 1), round(cadre.y1, 1)))
             keep.append(cadre)
@@ -1352,7 +1383,14 @@ def parse_pdf(content: bytes, filename: str):
                 # (voir JOURNAL BACKEND v2.32)
                 _ne_grille = (round(r.x0, 1), round(r.y0, 1),
                               round(r.x1, 1), round(r.y1, 1)) in cadres_grille
-                if not _ne_grille and _v21_est_receptacle(_t_clip):
+                # v2.33 — symétrique de la 2.32 : une case à remplir est une zone
+                # VIDE, jamais une image. La porte v2.21 jugeait le seul texte de
+                # la découpe et tuait toute scène tenant un nombre (les grenouilles
+                # sur « 47 », le garçon à l'ardoise « 9 + 4 »).
+                _imgr33 = any(not (ra & clip).is_empty
+                              and (ra & clip).get_area() >= 0.5 * min(ra.get_area(), clip.get_area())
+                              for ra in rasters)
+                if not _ne_grille and not _imgr33 and _v21_est_receptacle(_t_clip):
                     n_receptacles += 1
                     continue
                 import re as _re21
