@@ -214,7 +214,7 @@ PDF_B64_MAX = 4_000_000  # ~3 Mo de PDF, une trentaine de pages illustrées
 # Seule déclaration du numéro de version du backend. /health la LIT — jamais
 # recopiée à la main ailleurs (même règle que pour grilles/formes ci-dessous).
 # (voir JOURNAL BACKEND v2.23)
-VERSION = "2.29"
+VERSION = "2.30"
 # v2.28 — LE SERVEUR SIGNE SON CONTENU, PAS SEULEMENT SON NOM (11.08.2026).
 # Condition : le module se charge. Effet : l'empreinte du fichier lui-même est
 # calculée UNE fois et servie par /health. Une étiquette n'est pas le code (leçon
@@ -1349,8 +1349,15 @@ def parse_pdf(content: bytes, filename: str):
                 pix = page.get_pixmap(clip=clip, matrix=fitz.Matrix(2, 2))
                 if pix.width < 8 or pix.height < 8:
                     continue
-                b64 = base64.b64encode(pix.tobytes("png")).decode()
+                _png30 = pix.tobytes("png")
+                b64 = base64.b64encode(_png30).decode()
                 images.append({
+                    # v2.30 — chaque figure porte son cadre en PLEINES décimales
+                    # et le sceau de son contenu (sha-256 du PNG, 12 hex).
+                    # Condition : la figure est retenue. Effet : dire QUOI est
+                    # découpé, pas seulement combien. (voir JOURNAL BACKEND v2.30)
+                    "cadre": [clip.x0, clip.y0, clip.x1, clip.y1],
+                    "sceau": _hl.sha256(_png30).hexdigest()[:12],
                     # V2.21 — une figure qui porte des mots se SIGNALE, elle ne se
                     # supprime jamais : une scène concrète (bulle, étiquette de
                     # wagon) vaut plus que la règle (arbitrage du 10.08, K.5).
@@ -2787,6 +2794,31 @@ async def convert_pdf(file: UploadFile = File(...)):
 # ENDPOINT : /health
 # ─────────────────────────────────────────────
 _arasaac_probe_cache = {"t": 0.0, "state": "unknown"}
+
+@app.post("/figures_vues")
+async def figures_vues(file: UploadFile = File(...)):
+    # v2.30 — LA VOIX DU DIAGNOSTIC. Condition : un PDF reçu. Effet : la liste
+    # des figures telle que parse_pdf la fabrique (MÊME chemin de code, aucune
+    # découpe parallèle), sans les images elles-mêmes — ordre, page, cadre en
+    # pleines décimales, sceau du contenu, et l'empreinte du fichier reçu.
+    # (voir JOURNAL BACKEND v2.30)
+    content = await file.read()
+    if not (file.filename or "").lower().endswith(".pdf"):
+        raise HTTPException(status_code=400,
+                            detail="figures_vues ne lit que des PDF")
+    r = parse_pdf(content, file.filename)
+    return {
+        "version": VERSION, "empreinte": EMPREINTE, "lecteur_pdf": LECTEUR_PDF,
+        "fichier": {"nom": file.filename,
+                    "sha256": _hl.sha256(content).hexdigest()[:12],
+                    "octets": len(content)},
+        "nombre": len(r["images"]),
+        "figures": [{"ordre": i["index"], "page": i["page"],
+                     "cadre": i["cadre"], "sceau": i["sceau"],
+                     "w": i["w"], "h": i["h"]}
+                    for i in r["images"]],
+    }
+
 
 @app.get("/health")
 def health():
