@@ -214,7 +214,7 @@ PDF_B64_MAX = 4_000_000  # ~3 Mo de PDF, une trentaine de pages illustrées
 # Seule déclaration du numéro de version du backend. /health la LIT — jamais
 # recopiée à la main ailleurs (même règle que pour grilles/formes ci-dessous).
 # (voir JOURNAL BACKEND v2.23)
-VERSION = "2.30"
+VERSION = "2.32"
 # v2.28 — LE SERVEUR SIGNE SON CONTENU, PAS SEULEMENT SON NOM (11.08.2026).
 # Condition : le module se charge. Effet : l'empreinte du fichier lui-même est
 # calculée UNE fois et servie par /health. Une étiquette n'est pas le code (leçon
@@ -1182,6 +1182,7 @@ def parse_pdf(content: bytes, filename: str):
         # et l'élève une figure sans quadrillage à compter. On ajoute donc le
         # cadre complet, et on retire les morceaux qu'il contient — ils y sont
         # déjà, en place.
+        cadres_grille = set()      # v2.32 — cadres nes du module des grilles
         for g in grilles_page:
             if g["nature"] != "quadrillage":
                 continue
@@ -1192,6 +1193,8 @@ def parse_pdf(content: bytes, filename: str):
                     if not (cadre.contains(r)
                             or (not (r & cadre).is_empty
                                 and (r & cadre).get_area() >= 0.6 * r.get_area()))]
+            cadres_grille.add((round(cadre.x0, 1), round(cadre.y0, 1),
+                               round(cadre.x1, 1), round(cadre.y1, 1)))
             keep.append(cadre)
 
         # ══ v2.17 — UNE FORME À MOITIÉ DANS LA ZONE Y EST PRISE ENTIÈRE ═════
@@ -1341,7 +1344,15 @@ def parse_pdf(content: bytes, filename: str):
                 # V2.21 — un réceptacle de réponse ne part pas en image (B7) ;
                 # son contenu est déjà dans le texte, le frontend pose la case.
                 _t_clip = page.get_text(clip=clip)
-                if _v21_est_receptacle(_t_clip):
+                # v2.32 — UNE GRILLE DECLAREE N'EST PAS UN RECEPTACLE. Condition :
+                # le cadre vient du module des grilles. Effet : la porte des
+                # receptacles ne s'applique pas — une bande de 12 chiffres (piste
+                # de jeu, frise) n'est pas un « … + … = … ». Source unique : la
+                # nature d'une grille est jugee par le module, pas deux fois.
+                # (voir JOURNAL BACKEND v2.32)
+                _ne_grille = (round(r.x0, 1), round(r.y0, 1),
+                              round(r.x1, 1), round(r.y1, 1)) in cadres_grille
+                if not _ne_grille and _v21_est_receptacle(_t_clip):
                     n_receptacles += 1
                     continue
                 import re as _re21
