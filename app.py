@@ -214,7 +214,7 @@ PDF_B64_MAX = 4_000_000  # ~3 Mo de PDF, une trentaine de pages illustrées
 # Seule déclaration du numéro de version du backend. /health la LIT — jamais
 # recopiée à la main ailleurs (même règle que pour grilles/formes ci-dessous).
 # (voir JOURNAL BACKEND v2.23)
-VERSION = "2.28"
+VERSION = "2.29"
 # v2.28 — LE SERVEUR SIGNE SON CONTENU, PAS SEULEMENT SON NOM (11.08.2026).
 # Condition : le module se charge. Effet : l'empreinte du fichier lui-même est
 # calculée UNE fois et servie par /health. Une étiquette n'est pas le code (leçon
@@ -226,6 +226,19 @@ try:
         EMPREINTE = _hl.sha256(_f.read()).hexdigest()[:12]
 except Exception:
     EMPREINTE = "illisible"
+# v2.29 — LE SERVEUR ANNONCE AUSSI AVEC QUOI IL LIT (11.08.2026). Condition : le
+# module se charge. Effet : la version de la bibliothèque d'extraction est lue
+# UNE fois et servie par /health — deux machines qui comptent différemment se
+# voient d'un regard. Née de l'écart 12/11 du tirage 10371, environnement de
+# Render non lisible autrement. (voir JOURNAL BACKEND v2.29)
+try:
+    import pymupdf as _pm
+    LECTEUR_PDF = "pymupdf " + getattr(_pm, "__version__", "?")
+except Exception:
+    try:
+        LECTEUR_PDF = (fitz.__doc__ or "pymupdf ?").split(":")[0].strip().lower()
+    except Exception:
+        LECTEUR_PDF = "illisible"
 
 app = FastAPI(title="Tailory Backend V2")
 
@@ -2790,7 +2803,7 @@ def health():
     # V2.10 — la version du module grilles est remontée telle qu'elle est
     # DANS le fichier déployé, jamais recopiée à la main : c'est ce qui
     # permet de savoir, en ligne, laquelle tourne vraiment.
-    return {"status": "ok", "version": VERSION, "empreinte": EMPREINTE,
+    return {"status": "ok", "version": VERSION, "empreinte": EMPREINTE, "lecteur_pdf": LECTEUR_PDF,
             "grilles": (getattr(_grilles, "VERSION", "inconnue")
                         if GRILLES_ACTIVES else "absent"),
             "formes": (getattr(_formes, "VERSION", "inconnue")
