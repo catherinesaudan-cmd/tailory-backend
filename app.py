@@ -214,7 +214,60 @@ PDF_B64_MAX = 4_000_000  # ~3 Mo de PDF, une trentaine de pages illustrées
 # Seule déclaration du numéro de version du backend. /health la LIT — jamais
 # recopiée à la main ailleurs (même règle que pour grilles/formes ci-dessous).
 # (voir JOURNAL BACKEND v2.23)
-VERSION = "2.33"
+VERSION = "2.34"
+
+# ═══════════════════════════════════════════════════════════════════════════
+# v2.34 — C11 : UN CADRE SANS DESSIN N'EST PAS UNE FIGURE
+#
+# Condition : dans le cadre découpé, aucun objet dessiné.
+# Effet    : le cadre n'est pas transmis au modèle.
+# Le POURQUOI, les chiffres, le panel et les témoins : JOURNAL BACKEND v2.34.
+#
+# CE QUE CETTE FONCTION LIT, et qui existe bien à l'étape où elle tourne
+# (§ 2.5 du protocole, vérifié dans le code et non de mémoire) :
+#   · page.get_drawings()      — primitives de tracé de la page
+#   · page.get_text("dict")    — blocs de texte et blocs d'image de la page
+#   · rasters                  — images collées, déjà constituées en amont
+# Aucune déclaration d'une autre couche, aucun mot, aucune police, aucun nom
+# de fichier : deux proportions géométriques. Ce n'est PAS une reconnaissance
+# d'apparence au sens du § 2.1 — elle lit les primitives de dessin de la
+# SOURCE, pas ce que le modèle écrit.
+# ═══════════════════════════════════════════════════════════════════════════
+C11_AIRE_MIN_PT2 = 20.0    # sous cette aire, un tracé est un filet, pas un objet
+C11_PART_TEXTE = 0.10      # palier mesuré : 5 %, 10 % et 15 % donnent le même
+                           # résultat sur les 20 témoins — seuil au milieu
+C11_PLAFOND_CADRE = 0.60   # un tracé qui couvre plus de 60 % du cadre EST le
+                           # cadre — MAIS seulement si le cadre porte du texte
+
+
+def _v234_porte_un_dessin(page, clip, rasters):
+    """Vrai si le cadre porte au moins un objet dessiné (image collée ou
+    tracé qui n'est pas le contenant d'un texte)."""
+    dic = page.get_text("dict")
+    spans = [sp for b in dic["blocks"] if b["type"] == 0
+             for l in b["lines"] for sp in l["spans"]]
+    dedans = [sp for sp in spans if clip.intersects(fitz.Rect(sp["bbox"]))]
+    # une image collée est toujours un dessin
+    for ra in rasters:
+        if not (ra & clip).is_empty and (ra & clip).get_area() >= 0.5 * ra.get_area():
+            return True
+    aire_clip = clip.get_area()
+    for d in page.get_drawings():
+        r = fitz.Rect(d["rect"])
+        if not clip.contains(r) or r.width < 3 or r.height < 3:
+            continue
+        if r.get_area() < C11_AIRE_MIN_PT2:
+            continue
+        # un cadre qui n'est QU'une forme, c'est la forme elle-même : le
+        # plafond ne s'applique que si le cadre porte du texte.
+        if dedans and r.get_area() > C11_PLAFOND_CADRE * aire_clip:
+            continue
+        aire_txt = sum((fitz.Rect(sp["bbox"]) & r).get_area()
+                       for sp in spans if r.intersects(fitz.Rect(sp["bbox"])))
+        if aire_txt / r.get_area() < C11_PART_TEXTE:
+            return True
+    return False
+
 # v2.28 — LE SERVEUR SIGNE SON CONTENU, PAS SEULEMENT SON NOM (11.08.2026).
 # Condition : le module se charge. Effet : l'empreinte du fichier lui-même est
 # calculée UNE fois et servie par /health. Une étiquette n'est pas le code (leçon
@@ -1043,6 +1096,7 @@ def parse_pdf(content: bytes, filename: str):
     idx = 0
     zones_libres = []          # V2.21 — cadres nus vides, déclarés en zones
     n_receptacles = 0          # V2.21 — « … + … = … » écartés de la voie image
+    n_c11 = 0                  # v2.34 — cadres sans aucun dessin (C11)
     corrige = pages_de_corrige(doc)   # V2.20 — figures ET texte de ces pages restent dehors
 
     for pno, page in enumerate(doc):
@@ -1395,6 +1449,20 @@ def parse_pdf(content: bytes, filename: str):
                     continue
                 import re as _re21
                 _mots_clip = len(_re21.findall(r"[A-Za-zàâçéèêëîïôöûüù]{2,}", _t_clip))
+                # ══ v2.34 — UN CADRE SANS DESSIN N'EST PAS UNE FIGURE (C11) ══
+                # Condition : le cadre ne porte aucun objet dessiné.
+                # Effet : il n'est pas transmis.
+                # (voir JOURNAL BACKEND v2.34)
+                # UNE GRILLE DÉCLARÉE N'EST JAMAIS UNE FAUSSE FIGURE : sa
+                # nature est jugée par le module des grilles, pas deux fois
+                # (même principe que la v2.32). Défaut attrapé le 12.08 par le
+                # témoin T3 de la batterie 2.33 : une bande de nombres tracée
+                # au TRAIT n'a aucun objet dessiné au sens du filtre — chaque
+                # trait fait moins de 20 pt² — et disparaissait. Sur le CP-50,
+                # une bande reconstruite perd les couleurs de ses cases.
+                if not _ne_grille and not _v234_porte_un_dessin(page, clip, rasters):
+                    n_c11 += 1
+                    continue
                 pix = page.get_pixmap(clip=clip, matrix=fitz.Matrix(2, 2))
                 if pix.width < 8 or pix.height < 8:
                     continue
@@ -1461,6 +1529,8 @@ def parse_pdf(content: bytes, filename: str):
         # V2.21 — zones de production déclarées + réceptacles écartés, comptés
         "zones_libres": zones_libres,
         "receptacles_ecartes": n_receptacles,
+        "cadres_sans_dessin": n_c11,          # v2.34 — C11
+
         "num_exercises": 0,
         "num_images": len(images),
         "images": images,
