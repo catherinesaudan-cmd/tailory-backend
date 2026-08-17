@@ -214,7 +214,7 @@ PDF_B64_MAX = 4_000_000  # ~3 Mo de PDF, une trentaine de pages illustrées
 # Seule déclaration du numéro de version du backend. /health la LIT — jamais
 # recopiée à la main ailleurs (même règle que pour grilles/formes ci-dessous).
 # (voir JOURNAL BACKEND v2.23)
-VERSION = "2.34"
+VERSION = "2.35"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # v2.34 — C11 : UN CADRE SANS DESSIN N'EST PAS UNE FIGURE
@@ -1843,9 +1843,42 @@ async def parse_document(file: UploadFile = File(...)):
     def process_table(table):
         rows = []
         table_images = []
+        # v2.35 — une cellule fusionnée est rendue une fois par case couverte
+        # par python-docx : les références sont TENUES et chaque cellule ne
+        # compte qu'une fois. La sérialisation lit la cellule AU NIVEAU DU
+        # FICHIER : ses paragraphes directs (zones de texte ancrées comprises)
+        # puis ses tableaux imbriqués — c'est la lecture mesurée au panel
+        # (voir JOURNAL BACKEND v2.35).
+        _refs = []
+        _vues = set()
+        lignes_texte = []
+
+        def _texte_tc(tc_el):
+            parts = []
+            for p_el in tc_el.findall(qn("w:p")):
+                z = "".join(t.text or "" for t in p_el.iter(qn("w:t"))).strip()
+                if z:
+                    parts.append(z)
+            for tbl2 in tc_el.findall(qn("w:tbl")):
+                for tr2 in tbl2.findall(qn("w:tr")):
+                    ligne2 = []
+                    for tc2 in tr2.findall(qn("w:tc")):
+                        _refs.append(tc2)
+                        if id(tc2) in _vues:
+                            continue
+                        _vues.add(id(tc2))
+                        v = _texte_tc(tc2)
+                        if v:
+                            ligne2.append(v)
+                    if ligne2:
+                        parts.append("\t".join(ligne2))
+            return " ".join(parts).strip()
+
         for row in table.rows:
             cells = []
+            cellules_ligne = []
             for cell in row.cells:
+                _refs.append(cell._tc)
                 cell_text = cell.text.strip()
                 cell_imgs = extract_paragraph_images(cell._element)
                 table_images.extend(cell_imgs)
@@ -1853,17 +1886,27 @@ async def parse_document(file: UploadFile = File(...)):
                     "text": cell_text,
                     "images": cell_imgs
                 })
+                if id(cell._tc) not in _vues:
+                    _vues.add(id(cell._tc))
+                    plein = _texte_tc(cell._tc)
+                    if plein:
+                        cellules_ligne.append(plein)
             rows.append(cells)
+            if cellules_ligne:
+                lignes_texte.append("\t".join(cellules_ligne))
 
-        # Détecter le type de tableau
-        all_text = " ".join(
-            cell["text"] for row in rows for cell in row
-        ).lower()
-        ex_type = detect_exercise_type(all_text)
+        # v2.35 — le bloc tableau porte un champ texte : ses lignes
+        # sérialisées, que la page transmet comme tout champ texte
+        # (voir JOURNAL BACKEND v2.35).
+        texte_serial = "\n".join(lignes_texte)
+        ex_type = detect_exercise_type(texte_serial) if texte_serial else "autre"
+        is_consigne = ex_type != "autre" and len(texte_serial.split()) <= 15
 
         return {
             "type": "table",
             "rows": rows,
+            "text": texte_serial,
+            "is_consigne": is_consigne,
             "images": table_images,
             "exercise_type": ex_type,
             "num_cols": len(rows[0]) if rows else 0,
@@ -1873,6 +1916,46 @@ async def parse_document(file: UploadFile = File(...)):
     # Parcourir les éléments du document dans l'ordre
     from docx.oxml.ns import qn as oxqn
     body = doc.element.body
+
+    def blocs_zones_de_texte(p_element):
+        """v2.35 — chaque zone de texte ancrée dans ce paragraphe devient un
+        bloc SÉPARÉ, posé après lui : le paragraphe garde son texte d'origine
+        et ses consignes restent reconnues (voir JOURNAL BACKEND v2.35)."""
+        blocs = []
+        for tx in p_element.findall(".//" + oxqn("w:txbxContent")):
+            z = "".join(t.text or "" for t in tx.iter(oxqn("w:t"))).strip()
+            if not z:
+                continue
+            zt = detect_exercise_type(z)
+            zc = zt != "autre" and len(z.split()) <= 15
+            blocs.append({
+                "type": "paragraph",
+                "text": z,
+                "images": [],
+                "exercise_type": zt if zc else None,
+                "is_consigne": zc,
+                "style": "ZoneDeTexte",
+                "alignment": "left",
+            })
+        return blocs
+
+    def bloc_sdt(sdt_element):
+        """v2.35 — un bloc structuré de premier niveau est lu comme un
+        paragraphe (voir JOURNAL BACKEND v2.35)."""
+        z = "".join(t.text or "" for t in sdt_element.iter(oxqn("w:t"))).strip()
+        if not z:
+            return None
+        zt = detect_exercise_type(z)
+        zc = zt != "autre" and len(z.split()) <= 15
+        return {
+            "type": "paragraph",
+            "text": z,
+            "images": [],
+            "exercise_type": zt if zc else None,
+            "is_consigne": zc,
+            "style": "BlocStructure",
+            "alignment": "left",
+        }
 
     current_exercise = None
     exercise_blocks = []
@@ -1891,6 +1974,14 @@ async def parse_document(file: UploadFile = File(...)):
                 block = process_paragraph(para)
                 if block:
                     blocks.append(block)
+                # v2.35 — les zones ancrées ici suivent leur paragraphe
+                blocks.extend(blocs_zones_de_texte(child))
+
+        elif tag == "sdt":
+            # v2.35 — bloc structuré de premier niveau
+            b = bloc_sdt(child)
+            if b:
+                blocks.append(b)
 
         elif tag == "tbl":
             # Trouver le tableau correspondant
