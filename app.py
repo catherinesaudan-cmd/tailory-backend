@@ -214,7 +214,32 @@ PDF_B64_MAX = 4_000_000  # ~3 Mo de PDF, une trentaine de pages illustrées
 # Seule déclaration du numéro de version du backend. /health la LIT — jamais
 # recopiée à la main ailleurs (même règle que pour grilles/formes ci-dessous).
 # (voir JOURNAL BACKEND v2.23)
-VERSION = "2.35"
+# ═══════════════════════════════════════════════════════════════════════════
+# v2.38 — 19.08.2026 — LE DÉCOUPLAGE DE LA FEUILLE ET DU MODÈLE
+#
+#   CE QUI CHANGE : chaque figure porte désormais, EN PLUS de `data`, de quoi
+#   fabriquer une image DE FEUILLE — `origine` + `origine_boite` quand l'image
+#   de l'enseignante est utilisable telle quelle, `data_feuille` (la zone à
+#   300 ppp) sinon. `data` n'est pas touché.
+#
+#   LA MESURE QUI L'A JUSTIFIÉ : le 19.08.2026, sur les 17 documents du corpus,
+#   202 figures sur 202 étaient des PHOTOGRAPHIES de rectangles de page à
+#   144 ppp — aucune n'était l'image posée par l'enseignante. Départagé dans les
+#   deux sens : rapport pixels/millimètres constant à 144 ppp sur les 202, et
+#   une figure identique À L'OCTET au rendu de sa zone.
+#
+#   LE PÉRIMÈTRE : 35 figures sur 138 du lot A remplissent les quatre
+#   conditions. Les autres reçoivent la photographie à 300 ppp.
+#
+#   CE QUE ÇA COÛTE, MESURÉ : la feuille passe de 0,26 à 0,35 Mo (×1,32) et le
+#   serveur prend 0,06 s de plus sur 0,52 s (+11 %) — sur UN tirage de 8
+#   figures. Le temps d'ouverture ne bouge pas. Rien de ce qui part au modèle
+#   ne change, donc AUCUN coût de jetons.
+#
+#   ⛔ LA DIVERGENCE EST ÉCRITE À L'ENDROIT QUI DÉCIDE : voir `_v238_champs`.
+#   (voir JOURNAL BACKEND v2.38)
+# ═══════════════════════════════════════════════════════════════════════════
+VERSION = "2.38"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # v2.34 — C11 : UN CADRE SANS DESSIN N'EST PAS UNE FIGURE
@@ -971,13 +996,130 @@ def _span_est_gras(span):
     return ("bold" in nom) or ("black" in nom) or ("heavy" in nom)
 
 
-def _texte_gras(page):
-    """Texte de la page, gras marqué. Retombe sur get_text('text') au moindre doute."""
+# ═══ v2.36 — R1 : L'ANCRE DE LECTURE (chantier C8, reprise 89) ═════════════════
+# CONDITION : une page dont les blocs de texte sont rendus avec leur position.
+# EFFET : chaque figure de la page reçoit, dans le texte transmis au modèle, le
+# marqueur [TAILORY_IMG_N] posé APRÈS le bloc de texte qui la précède dans
+# l'ordre de lecture. Le texte n'est pas reconstruit : les marqueurs y sont
+# INSÉRÉS, et rien d'autre n'y change.
+# (voir JOURNAL BACKEND v2.36 — le défaut mesuré, sa cause, son remède)
+BANDE_ENJAMBEMENT = 8.0
+
+
+def bloc_enjambe(bloc, y_figure, bande=BANDE_ENJAMBEMENT):
+    """v2.37 — LA FIGURE EST-ELLE ENJAMBÉE PAR SON BLOC D'ANCRAGE ?
+
+    Un bloc de TEXTE à plusieurs lignes qui commence au-dessus de la figure et
+    se termine en dessous ne l'annonce plus : « avant » et « après » n'ont pas
+    de réponse unique. Arbitrage du 17.08 (voie 3) : cette figure ne reçoit pas
+    de marqueur, elle est comptée à part et déclarée.
+
+    TROIS CONDITIONS, et les trois sont nécessaires — la première version de
+    cette règle n'en portait qu'une et privait d'ancre 36 % des figures :
+      · le bloc est LU SUR LA PAGE, pas FABRIQUÉ par le serveur. Un cadre de
+        quadrillage couvre par nature une grande hauteur : il enjambe presque
+        tout, et son cadre ne dit rien de l'endroit où son texte est écrit.
+        Cadre et ligne ne sont pas la même grandeur.
+      · le bloc porte PLUSIEURS LIGNES. Un bloc d'une ligne ne peut pas
+        enjamber quoi que ce soit.
+      · son bas dépasse le haut de la figure de plus d'une bande de lecture.
+    """
+    if len(bloc) < 5 or bloc[4] is not False:
+        return False                      # fabriqué, ou origine inconnue
+    if bloc[3] is None:
+        return False
+    if (bloc[2] or "").count("\n") < 1:
+        return False                      # une seule ligne
+    return bloc[3] > y_figure + bande   # v2.37 — une bande de lecture ; au-delà, le bloc
+                          # enjambe vraiment la figure et ne l'annonce plus.
+
+
+def poser_ancres(texte, blocs, figures, cle=None):
+    """Rend (texte marqué, nombre posé, nombre non posé).
+
+    Une figure dont l'ancre ne peut pas être calculée n'est PAS posée au hasard :
+    elle est comptée à part et son marqueur n'est pas écrit. Un contrôle qui ne
+    peut pas s'exécuter ressemble à un contrôle qui passe (famille A8)."""
+    if not figures:
+        return texte, 0, 0
+    if not blocs:
+        return texte, 0, len(figures)
+
+    # Fins de bloc dans le texte. Le séparateur du join n'est PAS le même selon
+    # la fabrique qui a produit le texte (un saut de ligne ici, rien là, les
+    # blocs portant déjà le leur). Le supposer, c'est se tromper d'un caractère
+    # sur la moitié du corpus — mesuré le 17.08 : 9 documents sur 17 sans
+    # aucune ancre. On ne suppose donc rien : on RETROUVE chaque bloc dans le
+    # texte, de proche en proche.
+    fins, curseur = [], 0
+    for b in blocs:
+        t = b[2]
+        pos = texte.find(t, curseur)
+        if pos < 0:
+            return texte, 0, len(figures)  # le texte n'est pas celui des blocs
+        curseur = pos + len(t)
+        fins.append(curseur)
+
+    # L'ancre : le DERNIER bloc qui PRÉCÈDE la figure DANS L'ORDRE DU TEXTE.
+    #
+    # v2.37 (17.08.2026) — elle comparait des altitudes brutes, alors que le
+    # texte, lui, est assemblé par bandes. Mesuré : 9 marqueurs posés entre le
+    # numéro d'un exercice et sa consigne, parce qu'un numéro est écrit un
+    # point plus bas que la consigne qu'il annonce. L'ancre emploie désormais
+    # LA MÊME CLÉ que l'assemblage — `cle_lecture` du module des grilles, une
+    # seule au projet — et parcourt les blocs DANS L'ORDRE OÙ ILS SONT
+    # ASSEMBLÉS. Un ordre pour le texte, le même pour l'ancre.
+    if cle is None:
+        return texte, 0, len(figures)     # sans la clé du projet : abstention
+    poses = []
+    for f in figures:
+        cf = cle(f["cadre"][1], f["cadre"][0])
+        k = None
+        for i, b in enumerate(blocs):
+            if cle(b[0], b[1]) < cf:
+                k = i
+        # v2.37 — VOIE 3, arbitrage du 17.08 : une figure ENJAMBÉE par son bloc
+        # d'ancrage ne reçoit PAS de marqueur. Le bloc commence au-dessus d'elle
+        # — la règle est respectée — mais il se termine EN DESSOUS : « avant » et
+        # « après » n'ont alors pas de réponse unique, et poser le marqueur
+        # reviendrait à trancher au hasard. Elle est comptée à part et déclarée,
+        # comme une figure sans ancre. Seuil : le bas du bloc dépasse le haut de
+        # la figure de plus d'une bande de lecture. (voir JOURNAL BACKEND v2.37)
+        poses.append((k, f["index"]))
+
+    # On insère de la fin vers le début pour que les positions restent justes.
+    poses.sort(key=lambda p: ((p[0] if p[0] is not None else -1), p[1]))
+    n_pose = 0
+    for k, idx in reversed(poses):
+        marque = "[TAILORY_IMG_%d]" % idx
+        if k is None:
+            texte = marque + "\n" + texte          # au-dessus de tout texte
+        elif fins[k] < len(texte) and texte[fins[k]] == "\n":
+            texte = texte[:fins[k] + 1] + marque + "\n" + texte[fins[k] + 1:]
+        elif fins[k] > 0 and texte[fins[k] - 1] == "\n":
+            texte = texte[:fins[k]] + marque + "\n" + texte[fins[k]:]
+        elif fins[k] == len(texte):
+            texte = texte + "\n" + marque          # dernier bloc, pas de saut
+        else:
+            continue                                # position douteuse : rien
+        n_pose += 1
+    return texte, n_pose, len(figures) - n_pose
+
+
+def _texte_gras(page, rendre_blocs=False):
+    """Texte de la page, gras marqué. Retombe sur get_text('text') au moindre doute.
+
+    v2.36 — rendre_blocs=True rend AUSSI la liste des blocs dans l'ordre où ils
+    ont été assemblés, chacun avec sa position : (y0, x0, texte). Elle sert à
+    poser les ancres de lecture. Le texte rendu est le MÊME, caractère pour
+    caractère ; rien n'est reconstruit. (voir JOURNAL BACKEND v2.36)"""
     try:
         d = page.get_text("dict")
     except Exception:
-        return page.get_text("text")
+        t = page.get_text("text")
+        return (t, None) if rendre_blocs else t
     blocs = []
+    pos_y, pos_x, pos_y1 = [], [], []   # v2.36/37 — haut, gauche ET bas
     for b in d.get("blocks", []):
         if b.get("type", 0) != 0:
             continue
@@ -1003,9 +1145,16 @@ def _texte_gras(page):
             lignes.append(ligne)
         if lignes:
             blocs.append("\n".join(lignes))
+            _bb = b.get("bbox") or (0, 0, 0, 0)
+            pos_x.append(_bb[0]); pos_y.append(_bb[1]); pos_y1.append(_bb[3])
     if not blocs:
-        return page.get_text("text")
-    return "\n".join(blocs) + "\n"
+        t = page.get_text("text")
+        return (t, None) if rendre_blocs else t
+    texte = "\n".join(blocs) + "\n"
+    if rendre_blocs:
+        return texte, [(y, x, t, y1, False)
+                       for y, x, t, y1 in zip(pos_y, pos_x, blocs, pos_y1)]
+    return texte
 
 
 # ═══ V2.20 — LA PORTE DES CORRIGÉS (chantier F1, visage A) ═════════════════════
@@ -1077,6 +1226,185 @@ def pages_de_corrige(doc):
     return flag
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# v2.38 — LE DÉCOUPLAGE : LA FEUILLE ET LE MODÈLE NE REÇOIVENT PLUS LA MÊME
+#         IMAGE. Arbitrage de Catherine du 19.08.2026, réponse S1.
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# ⛔ ICI L'OUTIL SE MET À FAIRE DEUX CHOSES DIFFÉRENTES SELON LA FIGURE, ET
+#    C'EST ÉCRIT POUR QU'ON NE L'OUBLIE PAS.
+#
+#    « C'est exactement la divergence qui a causé C8 au départ — la route Word
+#      posait des repères, la route PDF n'en posait pas, et personne ne s'en
+#      souvenait. » (Catherine, 19.08.2026)
+#
+# CONDITION — une figure reçoit l'IMAGE D'ORIGINE de l'enseignante si, et
+#   seulement si, les quatre conditions suivantes sont vraies :
+#     1. son rectangle contient EXACTEMENT UNE pose d'image (à 90 % d'aire) ;
+#     2. cette image est plus fine que la photographie : au moins 144 ppp à la
+#        taille où elle est posée ;
+#     3. elle occupe au moins 90 % du rectangle ;
+#     4. aucun MOT (au moins une lettre) ne tombe dans le rectangle.
+#   Sinon, elle reçoit la MÊME ZONE RENDUE À 300 PPP.
+#
+# EFFET — deux champs neufs, jamais une entrée de plus ni de moins dans la
+#   liste des figures :
+#     `origine` + `origine_boite`  pour les figures qui remplissent les quatre
+#                                  conditions (la page compose l'image d'origine
+#                                  DANS un cadre de la taille du rectangle) ;
+#     `data_feuille`               pour toutes les autres.
+#   ⚠ `data` N'EST JAMAIS TOUCHÉ : c'est ce que le modèle reçoit, et il doit
+#     rester identique à l'octet. Contrôlé par `controle_data_modele.py` contre
+#     la référence gravée le 19.08.2026 (202 figures, 17 documents).
+#
+# POURQUOI — mesuré le 19.08.2026 : 202 figures sur 202 sont des PHOTOGRAPHIES
+#   de rectangles de la page à 144 ppp ; aucune n'est l'image de l'enseignante.
+#   La photographie reste nécessaire AU MODÈLE (journal frontend v10.70,
+#   27.07.2026 : « les figures extraites servent AUSSI de miniatures envoyées au
+#   modèle »), mais elle est floue sur la feuille et elle emporte des morceaux
+#   de page — un pointillé, un filet de bordure — vus par Catherine sur planche.
+#   Le journal du 27.07 portait déjà la piste, jamais reprise : « monter la
+#   définition d'extraction reste souhaitable le jour où les miniatures envoyées
+#   au modèle seront DÉCOUPLÉES des images posées sur la fiche ».
+#   (voir JOURNAL BACKEND v2.38 · JOURNAL FRONTEND v10.70 du 27.07.2026)
+#
+# LES DEUX CONTRAINTES MESURÉES QUE CE CODE DOIT TENIR :
+#   · LA TAILLE EST PORTÉE — `origine_boite` donne la place de l'image DANS le
+#     rectangle, en fractions. Sans elle, la mise en page bougeait de +26 % à
+#     +35 % (mesuré sur quatre figures) ;
+#   · LE RANG NE BOUGE PAS — la page pose les images par leur numéro d'ordre
+#     dans la liste (`tailoryv10_377.html` l. 4627). On enrichit chaque entrée
+#     À SA PLACE ; on n'en ajoute, ne retire ni ne réordonne aucune.
+
+_V238_PPP_PHOTO = 144.0      # la définition de la photographie, mesurée
+_V238_PPP_FEUILLE = 300.0    # la définition du rendu de feuille (R5)
+_V238_PART_MINI = 0.90       # l'image doit occuper 90 % du rectangle
+_V238_CONTENU = 0.90         # une pose est « dans » le rectangle à 90 % de son aire
+
+
+def _v238_aire(pts):
+    s = 0.0
+    for i in range(len(pts)):
+        x1, y1 = pts[i]
+        x2, y2 = pts[(i + 1) % len(pts)]
+        s += x1 * y2 - x2 * y1
+    return abs(s) / 2.0
+
+
+def _v238_coupe(pts, rect):
+    """Le polygone découpé par un rectangle droit (Sutherland-Hodgman)."""
+    x0, y0, x1, y1 = rect
+    def cx(a, b, x):
+        t = (x - a[0]) / (b[0] - a[0]) if b[0] != a[0] else 0.0
+        return (x, a[1] + t * (b[1] - a[1]))
+    def cy(a, b, y):
+        t = (y - a[1]) / (b[1] - a[1]) if b[1] != a[1] else 0.0
+        return (a[0] + t * (b[0] - a[0]), y)
+    for dedans, inter in ((lambda p: p[0] >= x0, lambda a, b: cx(a, b, x0)),
+                          (lambda p: p[0] <= x1, lambda a, b: cx(a, b, x1)),
+                          (lambda p: p[1] >= y0, lambda a, b: cy(a, b, y0)),
+                          (lambda p: p[1] <= y1, lambda a, b: cy(a, b, y1))):
+        out = []
+        for i in range(len(pts)):
+            a, b = pts[i], pts[(i + 1) % len(pts)]
+            da, db = dedans(a), dedans(b)
+            if da:
+                out.append(a)
+                if not db:
+                    out.append(inter(a, b))
+            elif db:
+                out.append(inter(a, b))
+        pts = out
+        if not pts:
+            return []
+    return pts
+
+
+def _v238_poses(page):
+    """Toutes les poses d'images de la page, chacune en quadrilatère.
+    Une pose DROITE est un quadrilatère comme une autre : un seul chemin."""
+    out = []
+    try:
+        infos = page.get_image_info(xrefs=True)
+    except Exception:
+        return out
+    for it in infos:
+        t = it.get("transform")
+        if not t:
+            continue
+        pts = [(t[0] * x + t[2] * y + t[4], t[1] * x + t[3] * y + t[5])
+               for x, y in ((0, 0), (1, 0), (1, 1), (0, 1))]
+        if _v238_aire(pts) <= 0:
+            continue
+        out.append((it.get("xref", 0), pts))
+    return out
+
+
+def _v238_origine_png(doc, xref):
+    """L'image d'origine, avec sa transparence si elle en a une."""
+    import io as _io238
+    from PIL import Image as _Im238
+    info = doc.extract_image(xref)
+    im = _Im238.open(_io238.BytesIO(info["image"]))
+    if info.get("smask"):
+        m = _Im238.open(_io238.BytesIO(doc.extract_image(info["smask"])["image"])).convert("L")
+        im = im.convert("RGBA")
+        im.putalpha(m)
+    b = _io238.BytesIO()
+    im.save(b, format="PNG")
+    return b.getvalue(), im.size
+
+
+def _v238_champs(doc, page, clip, mots_clip):
+    """Les champs neufs d'une figure. Rend (dict, 'origine'|'feuille').
+
+    ⛔ NE TOUCHE JAMAIS `data`. Si quoi que ce soit échoue, la figure retombe
+    sur `data_feuille` — jamais sur rien : une figure sans image de feuille
+    serait une figure perdue, et c'est le défaut que la v2.34 a déjà payé.
+    """
+    import base64 as _b64238
+    rect = (clip.x0, clip.y0, clip.x1, clip.y1)
+    aire_rect = max(0.0, clip.width) * max(0.0, clip.height)
+    dedans = []
+    if aire_rect > 0:
+        for xref, pts in _v238_poses(page):
+            a = _v238_aire(pts)
+            if a <= 0:
+                continue
+            if _v238_aire(_v238_coupe(list(pts), rect)) / a >= _V238_CONTENU:
+                dedans.append((xref, pts, a))
+    if len(dedans) == 1 and mots_clip == 0:
+        xref, pts, aire_pose = dedans[0]
+        try:
+            octets, (px, py) = _v238_origine_png(doc, xref)
+            import math as _m238
+            larg_pt = _m238.hypot(pts[1][0] - pts[0][0], pts[1][1] - pts[0][1])
+            haut_pt = _m238.hypot(pts[3][0] - pts[0][0], pts[3][1] - pts[0][1])
+            ppp = min(px / (larg_pt / 72.0) if larg_pt else 0,
+                      py / (haut_pt / 72.0) if haut_pt else 0)
+            part = aire_pose / aire_rect
+            if ppp >= _V238_PPP_PHOTO and part >= _V238_PART_MINI:
+                xs = [p[0] for p in pts]; ys = [p[1] for p in pts]
+                boite = [round((min(xs) - clip.x0) / clip.width, 4),
+                         round((min(ys) - clip.y0) / clip.height, 4),
+                         round((max(xs) - clip.x0) / clip.width, 4),
+                         round((max(ys) - clip.y0) / clip.height, 4)]
+                return ({"origine": "data:image/png;base64,"
+                                    + _b64238.b64encode(octets).decode(),
+                         "origine_boite": boite,
+                         "origine_ppp": round(ppp)}, "origine")
+        except Exception:
+            pass
+    try:
+        m = _V238_PPP_FEUILLE / 72.0
+        pf = page.get_pixmap(clip=clip, matrix=fitz.Matrix(m, m))
+        return ({"data_feuille": "data:image/png;base64,"
+                                 + _b64238.b64encode(pf.tobytes("png")).decode()},
+                "feuille")
+    except Exception:
+        return ({}, "aucun")
+
+
 def parse_pdf(content: bytes, filename: str):
     """
     Extrait d'un PDF, dans l'ordre de lecture :
@@ -1089,6 +1417,12 @@ def parse_pdf(content: bytes, filename: str):
     v2.7 : clustering par composantes connexes, marge 10 pt.
     """
     doc = fitz.open(stream=content, filetype="pdf")
+    # v2.38 — LES DEUX CHIFFRES DE LA DIVERGENCE, comptés pendant la lecture et
+    # rendus dans la réponse. Catherine, 19.08.2026 : « le journal de la version
+    # doit dire le chiffre : combien de figures reçoivent la vraie image,
+    # combien restent en photographie. » Un compte qui n'est pas rendu n'est pas
+    # un compte.
+    _v238_compte = {}
     images = []
     full_text = []
     grilles_inventaire = []
@@ -1097,6 +1431,8 @@ def parse_pdf(content: bytes, filename: str):
     zones_libres = []          # V2.21 — cadres nus vides, déclarés en zones
     n_receptacles = 0          # V2.21 — « … + … = … » écartés de la voie image
     n_c11 = 0                  # v2.34 — cadres sans aucun dessin (C11)
+    n_ancres = 0               # v2.36 — marqueurs de position posés
+    n_ancres_hors = 0          # v2.36 — figures sans ancre, comptées à part
     corrige = pages_de_corrige(doc)   # V2.20 — figures ET texte de ces pages restent dehors
 
     for pno, page in enumerate(doc):
@@ -1127,19 +1463,22 @@ def parse_pdf(content: bytes, filename: str):
                         for f in formes_page]
 
         grilles_page, zones_grilles = [], []
+        blocs_page = None               # v2.36 — blocs de la page, pour l'ancre
+        i0_page = len(images)           # v2.36 — première figure de cette page
         if GRILLES_ACTIVES:
             try:
                 analyse = _grilles.analyser_page(page)
                 grilles_page = analyse["grilles"]
                 zones_grilles = analyse["zones_grilles"]
-                texte_page = _grilles.texte_avec_grilles(
-                    page, grilles_page, blocs_formes)
+                texte_page, blocs_page = _grilles.texte_avec_grilles(
+                    page, grilles_page, blocs_formes, rendre_blocs=True)
             except Exception:
-                texte_page = _texte_gras(page)      # v2.14
+                texte_page, blocs_page = _texte_gras(page, rendre_blocs=True)
         else:
-            texte_page = _texte_gras(page)          # v2.14
+            texte_page, blocs_page = _texte_gras(page, rendre_blocs=True)
             if blocs_formes:
                 texte_page += "\n" + "\n".join(b[2] for b in sorted(blocs_formes))
+                blocs_page = None       # v2.36 — ajout hors blocs : on s'abstient
 
         # v2.5 — les lignes fines ne partent que si la page parle de mesure ou
         # de tracé : sur une fiche de français, les lignes de réponse aux
@@ -1380,7 +1719,35 @@ def parse_pdf(content: bytes, filename: str):
             _rg.sort(key=lambda r: r.x0)
             keep.extend(_rg)
 
-        # Rasterisation 2x de chaque zone
+        # ══ POURQUOI ON PHOTOGRAPHIE LA ZONE AU LIEU D'EXTRAIRE L'IMAGE ══
+        # Raison écrite le 19.08.2026 : elle manquait ici depuis toujours,
+        # alors que six décisions de ce fichier portent la leur (v2.20, v2.21,
+        # v2.30, v2.32, v2.33, v2.34). C'est la seule décision non justifiée du
+        # fichier, et c'est celle qui décide de quoi est faite l'image que
+        # l'élève reçoit.
+        #
+        # CONDITION : une zone a été retenue comme figure.
+        # EFFET : elle est RENDUE — photographiée telle qu'elle se voit sur la
+        #   page — et non extraite du PDF comme objet image.
+        # RAISON : la même image sert DEUX FOIS. Elle est envoyée au modèle
+        #   comme miniature, et posée sur la feuille de l'élève. Le modèle doit
+        #   voir la zone TELLE QU'ELLE EST — traits, texte et images ensemble —
+        #   ce qu'aucun objet image du fichier ne montre à lui seul. Une zone
+        #   peut d'ailleurs ne contenir AUCUNE image : sur les 17 documents du
+        #   corpus, les pages portent 8 338 tracés pour 137 images.
+        #   (voir JOURNAL FRONTEND v10.70, 27.07.2026 : « les figures extraites
+        #    servent AUSSI de miniatures envoyées au modèle »)
+        #
+        # ⚠ CE QUE CE CHOIX COÛTE, ET IL EST MESURÉ (19.08.2026) : 202 figures
+        #   sur 202, sur les 17 documents, sont des photographies — AUCUNE n'est
+        #   l'image posée par l'enseignante. La feuille de l'élève reçoit donc
+        #   toujours un rendu à 144 ppp, jamais l'original.
+        #   LA PISTE EST OUVERTE AU JOURNAL DEPUIS LE 27.07.2026 et n'a jamais
+        #   été reprise : « monter la définition d'extraction reste souhaitable
+        #   le jour où les miniatures envoyées au modèle seront DÉCOUPLÉES des
+        #   images posées sur la fiche. » (JOURNAL FRONTEND v10.70)
+        #
+        # Matrix(2,2) sur 72 ppp = 144 ppp. Rasterisation 2x de chaque zone.
         page_words = page.get_text("words")
         for r in keep:
             try:
@@ -1467,6 +1834,7 @@ def parse_pdf(content: bytes, filename: str):
                 if pix.width < 8 or pix.height < 8:
                     continue
                 _png30 = pix.tobytes("png")
+                _v238_extra, _v238_voie = _v238_champs(doc, page, clip, _mots_clip)
                 b64 = base64.b64encode(_png30).decode()
                 images.append({
                     # v2.30 — chaque figure porte son cadre en PLEINES décimales
@@ -1490,7 +1858,12 @@ def parse_pdf(content: bytes, filename: str):
                     # (class="img-echelle") pour la mesure à la règle.
                     "w_mm": round(clip.width * 25.4 / 72, 1),
                     "h_mm": round(clip.height * 25.4 / 72, 1),
+                    # v2.38 — LA DIVERGENCE : voir l'en-tête de `_v238_champs`.
+                    # `data` ci-dessus part au MODÈLE et n'est pas touché ;
+                    # ces champs-ci ne servent qu'à LA FEUILLE DE L'ÉLÈVE.
+                    **_v238_extra,
                 })
+                _v238_compte[_v238_voie] = _v238_compte.get(_v238_voie, 0) + 1
                 idx += 1
             except Exception:
                 pass
@@ -1518,6 +1891,14 @@ def parse_pdf(content: bytes, filename: str):
                 "aire_refusee": f["aire_refusee"],
             })
 
+        # v2.36 — R1 : les figures de CETTE page reçoivent leur marqueur de
+        # position dans le texte, à l'endroit où l'œil les rencontre.
+        texte_page, _n_pose, _n_hors = poser_ancres(
+            texte_page, blocs_page, images[i0_page:],
+            getattr(_grilles, "cle_lecture", None) if _grilles else None)
+        n_ancres += _n_pose
+        n_ancres_hors += _n_hors
+
         full_text.append(texte_page)
 
     doc.close()
@@ -1530,6 +1911,20 @@ def parse_pdf(content: bytes, filename: str):
         "zones_libres": zones_libres,
         "receptacles_ecartes": n_receptacles,
         "cadres_sans_dessin": n_c11,          # v2.34 — C11
+        # v2.36 — R1 : ce qui a été ancré, et ce qui ne l'a pas été. L'absence
+        # se compte, elle ne se tait pas (A6/A21/A22).
+        "ancres_posees": n_ancres,
+        "ancres_absentes": n_ancres_hors,
+
+        # v2.38 — LA DIVERGENCE, CHIFFRÉE ET RENDUE (voir `_v238_champs`).
+        # Ces deux nombres disent, pour CE document, combien de figures la
+        # feuille recevra en image d'origine et combien en photographie à
+        # 300 ppp. `figures_aucune` compte les figures pour lesquelles NI l'une
+        # NI l'autre n'a pu être fabriquée : elles retombent sur `data`, et
+        # elles ne se taisent pas.
+        "figures_image_origine": _v238_compte.get("origine", 0),
+        "figures_photographie": _v238_compte.get("feuille", 0),
+        "figures_aucune": _v238_compte.get("aucun", 0),
 
         "num_exercises": 0,
         "num_images": len(images),
