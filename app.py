@@ -239,7 +239,7 @@ PDF_B64_MAX = 4_000_000  # ~3 Mo de PDF, une trentaine de pages illustrées
 #   ⛔ LA DIVERGENCE EST ÉCRITE À L'ENDROIT QUI DÉCIDE : voir `_v238_champs`.
 #   (voir JOURNAL BACKEND v2.38)
 # ═══════════════════════════════════════════════════════════════════════════
-VERSION = "2.38"
+VERSION = "2.39"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # v2.34 — C11 : UN CADRE SANS DESSIN N'EST PAS UNE FIGURE
@@ -1032,6 +1032,63 @@ def bloc_enjambe(bloc, y_figure, bande=BANDE_ENJAMBEMENT):
         return False                      # une seule ligne
     return bloc[3] > y_figure + bande   # v2.37 — une bande de lecture ; au-delà, le bloc
                           # enjambe vraiment la figure et ne l'annonce plus.
+
+
+def _v239_distance_sous(page, figures, _tol=0.5):
+    """Pose `ecart_mm` sur chaque figure qui a quelque chose en dessous d'elle.
+
+    v2.39 — arbitrage de Catherine du 21.08.2026. Rend le nombre de figures
+    servies. NE POSE RIEN quand rien n'est trouvé : l'absence du champ EST le
+    silence, et la page sait déjà ne rien ajouter quand une valeur manque
+    (`if(!meta||!meta.w_mm)return;`).
+
+    « La première chose en dessous, quelle qu'elle soit » : les blocs de texte de
+    la page ET les autres figures, sans distinction — pas de cas particulier.
+    « En dessous » veut dire sous elle : on exige un recouvrement horizontal,
+    sinon la colonne voisine serait prise pour le dessous.
+
+    ⛔ Mesuré avant d'être écrit, sur les 17 documents (`preuve_distance_absente.txt`,
+    `mesure_distance_absente.py`, 8 témoins joués) : 203 figures, 0 cas où la
+    distance est incalculable.
+    ⛔ ET LE CHIFFRE A ÉTÉ CORRIGÉ PAR CE CODE MÊME : le carnet annonçait 174
+    figures servies et 29 muettes ; cette fonction en sert **171** et en laisse
+    **32**. L'écart est de trois, il est nommé et vérifié — `cp-13` fig 13,
+    `cp-27` fig 23 et 24 — et il vient de ce que le carnet ne POUVAIT PAS faire :
+    son test de colonne était inerte pour le texte, faute de bord droit dans les
+    blocs du serveur. Les trois ont leur texte dans une AUTRE COLONNE : rien
+    n'est sous elles. Le silence est le bon comportement.
+    """
+    if not figures:
+        return 0
+    objets = []
+    try:
+        for b in page.get_text("blocks"):
+            if len(b) >= 5 and str(b[4]).strip():
+                objets.append((b[1], b[0], b[2]))          # (haut, gauche, droite)
+    except Exception:
+        return 0                                            # on s'abstient, on ne devine pas
+    for f in figures:
+        c = f.get("cadre")
+        if c:
+            objets.append((c[1], c[0], c[2]))
+    n = 0
+    for f in figures:
+        c = f.get("cadre")
+        if not c:
+            continue
+        x0, y0, x1, y1 = c[0], c[1], c[2], c[3]
+        haut_du_dessous = None
+        for (oy0, ox0, ox1) in objets:
+            if oy0 < y1 - _tol:                             # pas en dessous
+                continue
+            if min(x1, ox1) - max(x0, ox0) <= 0:            # pas sous elle
+                continue
+            if haut_du_dessous is None or oy0 < haut_du_dessous:
+                haut_du_dessous = oy0
+        if haut_du_dessous is not None:
+            f["ecart_mm"] = round((haut_du_dessous - y1) * 25.4 / 72, 1)
+            n += 1
+    return n
 
 
 def poser_ancres(texte, blocs, figures, cle=None):
@@ -1890,6 +1947,23 @@ def parse_pdf(content: bytes, filename: str):
                 "aire_mm2": f["aire_mm2"],
                 "aire_refusee": f["aire_refusee"],
             })
+
+        # ══ v2.39 — LA DISTANCE SOUS UNE FIGURE EST CELLE DE LA SOURCE ══
+        # Arbitrage de Catherine, 21.08.2026 : « On mesure, dans le document
+        # source, l'espace entre le bas de la figure et la première chose qui
+        # vient en dessous, quelle qu'elle soit — texte, autre figure, tableau.
+        # On le reporte tel quel. Si la distance n'est pas connue, ou s'il n'y a
+        # rien en dessous : aucune marge n'est ajoutée. L'outil se tait. »
+        #
+        # ⛔ POURQUOI PAS `blocs_page`, QUI EST POURTANT LÀ. Les blocs rendus par
+        # `_texte_gras` (l. 1155) ne portent que (y0, x0, texte, y1) : LE BORD
+        # DROIT MANQUE. Or « en dessous » demande la largeur, sinon une figure de
+        # la colonne de gauche prendrait sa distance sur la colonne de droite.
+        # Reprendre les boîtes complètes ici coûte une lecture ; changer la forme
+        # du 5-uplet coûterait de toucher AUSSI `grilles_v2_14.texte_avec_grilles`,
+        # qui produit la même forme. On ne change pas une forme partagée pour un
+        # champ neuf.
+        _v239_distance_sous(page, images[i0_page:])
 
         # v2.36 — R1 : les figures de CETTE page reçoivent leur marqueur de
         # position dans le texte, à l'endroit où l'œil les rencontre.
