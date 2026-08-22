@@ -239,7 +239,7 @@ PDF_B64_MAX = 4_000_000  # ~3 Mo de PDF, une trentaine de pages illustrées
 #   ⛔ LA DIVERGENCE EST ÉCRITE À L'ENDROIT QUI DÉCIDE : voir `_v238_champs`.
 #   (voir JOURNAL BACKEND v2.38)
 # ═══════════════════════════════════════════════════════════════════════════
-VERSION = "2.39"
+VERSION = "2.40"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # v2.34 — C11 : UN CADRE SANS DESSIN N'EST PAS UNE FIGURE
@@ -2121,7 +2121,18 @@ def rasterize_blobs(jobs):
 # des saisons). Mais c'est un changement de pipeline pour un format qui MARCHE
 # aujourd'hui : il se mesure sur un document témoin avant d'être fait, pas en
 # même temps qu'une ouverture de formats. C'est le chantier v2.10 nº 1.
-FORMATS_BUREAUTIQUES = ("odt", "doc", "rtf", "ott", "fodt", "sxw", "wps", "abw")
+#
+# V2.40 — LE DOCX ENTRE DANS LA LISTE (22.08.2026). La condition ci-dessus est
+# LEVÉE PAR CATHERINE : la mesure sur document témoin existe depuis le 17.08 —
+# même fichier, lecture directe 0 exercice · 2 images · 61 caractères, contre
+# conversion 14 figures · 2 grilles (plan, entrée DOCX-VIDE). Ses mots : « La
+# condition est remplie, je la lève. Ajoute docx aux formats bureautiques. »
+# Effet : le .docx prend la route LibreOffice → PDF comme le .doc — cadres,
+# distances, et pages vues par le modèle (pdf_b64). La lecture directe des
+# paragraphes (réparée en v2.35) reste dans la pièce mais n'est plus atteinte
+# par le .docx. Batterie : batterie_routage_docx.py — ROUGE sur la 2.39
+# (B1·B2·B3), le remède doit la rendre verte sans toucher les 16 non-docx.
+FORMATS_BUREAUTIQUES = ("docx", "odt", "doc", "rtf", "ott", "fodt", "sxw", "wps", "abw")
 
 # ODT (et formats bureautiques) : conversion → PDF via LibreOffice
 # La route ODT→PDF est volontaire : les ODT contiennent souvent des formes
