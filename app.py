@@ -239,7 +239,7 @@ PDF_B64_MAX = 4_000_000  # ~3 Mo de PDF, une trentaine de pages illustrées
 #   ⛔ LA DIVERGENCE EST ÉCRITE À L'ENDROIT QUI DÉCIDE : voir `_v238_champs`.
 #   (voir JOURNAL BACKEND v2.38)
 # ═══════════════════════════════════════════════════════════════════════════
-VERSION = "2.40"
+VERSION = "2.41"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # v2.34 — C11 : UN CADRE SANS DESSIN N'EST PAS UNE FIGURE
@@ -3185,7 +3185,11 @@ async def generate(request: Request):
     messages = body.get("messages", [])
     max_tokens = body.get("max_tokens", 6000)
 
-    client = anthropic.Anthropic(api_key=api_key)
+    # V2.41 — condition : la bibliothèque refuse une génération non-streaming
+    # au-delà de ~21 333 jetons quand l'attente est celle par défaut ; effet :
+    # l'attente est DÉCLARÉE (3600 s), la porte ne joue plus et le plafond de
+    # 32 000 de la page reste servi. Pourquoi : JOURNAL_BACKEND_v2_41.md.
+    client = anthropic.Anthropic(api_key=api_key, timeout=3600.0)
 
     # ══ v2.13 — LE CACHE SURVIT À LA DURÉE D'UNE PARTIE ═══════════════════════════════════
     # Constat des tirages (pied de page essai_10138) : « 10 009 lus + 0 relus +
