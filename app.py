@@ -239,7 +239,7 @@ PDF_B64_MAX = 4_000_000  # ~3 Mo de PDF, une trentaine de pages illustrées
 #   ⛔ LA DIVERGENCE EST ÉCRITE À L'ENDROIT QUI DÉCIDE : voir `_v238_champs`.
 #   (voir JOURNAL BACKEND v2.38)
 # ═══════════════════════════════════════════════════════════════════════════
-VERSION = "2.41"
+VERSION = "2.42"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # v2.34 — C11 : UN CADRE SANS DESSIN N'EST PAS UNE FIGURE
@@ -2177,20 +2177,17 @@ def convert_office_to_pdf(content: bytes, ext: str):
 # la page à jour, et la capacité existe sans être offerte — c'est exactement ce
 # qui vient de se passer avec le .doc. Le serveur est le seul à savoir ce qu'il
 # sait ouvrir : il le dit, la page l'affiche.
-FORMATS_ACCEPTES = tuple(sorted(set(FORMATS_BUREAUTIQUES + ("pdf", "docx", "txt"))))
+# Porte du dépôt : ce que /formats annonce à la page. Les routes de
+# conversion (FORMATS_BUREAUTIQUES) restent servies aux appels directs au
+# serveur. (voir JOURNAL v2.42)
+FORMATS_PORTE = ("pdf", "txt")
 
 
 @app.get("/formats")
 async def formats_acceptes():
-    """Liste des extensions que /parse sait traiter. La page s'en sert pour
-    construire son filtre de fichier et son message d'erreur — elle n'en tient
-    plus sa propre copie."""
-    return {
-        "formats": list(FORMATS_ACCEPTES),
-        "bureautiques": list(FORMATS_BUREAUTIQUES),
-        "note": "les formats bureautiques passent par LibreOffice puis par le "
-                "pipeline PDF : le modèle voit alors les pages",
-    }
+    """Ce que la porte du dépôt accepte. La page s'en sert pour son filtre
+    de fichier et son message de refus. (voir JOURNAL v2.42)"""
+    return {"formats": list(FORMATS_PORTE)}
 
 
 # ─────────────────────────────────────────────
