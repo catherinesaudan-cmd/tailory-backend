@@ -179,7 +179,7 @@ V2.3 (retours essais 25-29) :
         des longueurs toutes différentes, c'est le principe de l'exercice.
 """
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, Request
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 import anthropic
@@ -239,7 +239,7 @@ PDF_B64_MAX = 4_000_000  # ~3 Mo de PDF, une trentaine de pages illustrées
 #   ⛔ LA DIVERGENCE EST ÉCRITE À L'ENDROIT QUI DÉCIDE : voir `_v238_champs`.
 #   (voir JOURNAL BACKEND v2.38)
 # ═══════════════════════════════════════════════════════════════════════════
-VERSION = "2.42"
+VERSION = "2.43"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # v2.34 — C11 : UN CADRE SANS DESSIN N'EST PAS UNE FIGURE
@@ -2194,8 +2194,380 @@ async def formats_acceptes():
 # ENDPOINT : /parse
 # DOCX / PDF / ODT → structure JSON pédagogique
 # ─────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════
+# v2.43 — LA SYMBIOSE : LE MODÈLE VISE, LE CODE DÉCIDE, LE SERVEUR REDÉCOUPE
+# Condition : /parse reçoit un champ facultatif `api_key` ET le document est
+#             un PDF. Sans clé, RIEN ne change (sortie identique à la 2.42).
+# Effet : (1) le modèle juge L'USAGE des tracés et des textes visibles, par
+#         tuiles numérotées, UN jugement par famille de jumeaux ; (2) les
+#         décors jugés « ne sert pas » sont caviardés (tracé entier touché ;
+#         texte retiré dans sa boîte ; les images ne sont JAMAIS touchées) ;
+#         (3) les amas de matière libérée sont retaillés en pages seules et
+#         REDONNÉS à parse_pdf lui-même — les découpes récupérées passent par
+#         le même enrichissement et rejoignent le tableau `images`, cadres
+#         replacés, indices continus. Un champ additif `symbiose` dit tout
+#         (tuiles jouées/non jugées, familles, jetons, récupérées) ; une
+#         tuile illisible est NON JUGÉE et DITE, jamais complétée ; une
+#         panne de l'étage rend le parse d'aujourd'hui, avec l'erreur DITE.
+# Pourquoi : JOURNAL_BACKEND_v2_43.md (chantier REMEDE-SYMBIOSE — l'arbitrage
+# R3 de Catherine du 23.08.2026, panel PANEL_REMEDE_SYMBIOSE.md porte 7/7).
+# ═══════════════════════════════════════════════════════════════════════════
+_S243_MODELE = "claude-opus-5"
+_S243_TUILE_MAX = 110
+_S243_COLLE = 14.0
+_S243_MIN_COTE = 12.0
+_S243_MIN_AIRE = 900.0
+_S243_DEMANDE = (
+    "Voici une bande découpée dans une page de fiche d'école. Des ÉLÉMENTS y "
+    "sont entourés en orange et numérotés T1, T2… (des tracés — traits, "
+    "cadres, cases, fonds — et des lignes de texte). La règle qui décide, "
+    "mot pour mot : « Ce qui doit rester sur la feuille, c'est ce qui sert à "
+    "l'élève. Une case où il écrit, une bande qu'il lit, une figure qu'il "
+    "regarde. Le reste part. » Pour CHAQUE numéro de la liste, rends un "
+    "jugement d'USAGE : \"sert\" (à l'élève) · \"ne sert pas\" (décor, "
+    "habillage d'éditeur, cartouche, pastille, cadre décoratif, consigne que "
+    "l'outil réécrit ailleurs) · \"ne vois pas\". Réponds UNIQUEMENT par un "
+    "bloc JSON : {\"verdicts\":[{\"n\":1,\"v\":\"sert\"}]} — chaque numéro, "
+    "EXACTEMENT une fois. La liste : ")
+
+
+def _s243_famille(bb):
+    return (round((bb[2] - bb[0]) * 2) / 2, round((bb[3] - bb[1]) * 2) / 2)
+
+
+def _s243_items_de_page(page):
+    """(tracés uniques {bbox: famille}, lignes de texte visibles [(bbox, txt)])."""
+    traces = {}
+    for g in page.get_drawings():
+        r = g["rect"]
+        bb = (round(r.x0, 2), round(r.y0, 2), round(r.x1, 2), round(r.y1, 2))
+        traces[bb] = _s243_famille(bb)
+    textes = []
+    for b in page.get_text("dict")["blocks"]:
+        if b["type"] != 0:
+            continue
+        for l in b.get("lines", []):
+            t = "".join(s.get("text", "") for s in l.get("spans", []))
+            if t.strip():
+                textes.append((tuple(l["bbox"]), t.strip()))
+    return traces, textes
+
+
+def _s243_tuile_png(page, lot):
+    """L'image de la tuile, éléments numérotés. lot : [(num, bbox)]."""
+    y0 = max(0.0, min(b[1] for _n, b in lot) - 6)
+    y1 = min(page.rect.height, max(b[3] for _n, b in lot) + 6)
+    clip = fitz.Rect(0, y0, page.rect.width, y1)
+    g = min(4.0, 1500.0 / max(clip.width, clip.height))
+    pm = page.get_pixmap(clip=clip, matrix=fitz.Matrix(g, g))
+    d = fitz.open()
+    p2 = d.new_page(width=pm.width, height=pm.height)
+    p2.insert_image(fitz.Rect(0, 0, pm.width, pm.height), pixmap=pm)
+    for num, bb in lot:
+        rr = fitz.Rect((bb[0] - clip.x0) * g - 1, (bb[1] - clip.y0) * g - 1,
+                       (bb[2] - clip.x0) * g + 1, (bb[3] - clip.y0) * g + 1)
+        p2.draw_rect(rr, color=(1, 0.45, 0), width=1.2)
+        p2.insert_text((rr.x0 + 1, max(12, rr.y0 - 3)), "T%d" % num,
+                       fontsize=11, color=(0.85, 0.1, 0))
+    png = p2.get_pixmap(matrix=fitz.Matrix(1, 1)).tobytes("png")
+    d.close()
+    return png
+
+
+def _s243_depouille(texte, numeros):
+    """La partition exacte des numéros, ou la faute — jamais un trou."""
+    try:
+        deb = texte.index("{")
+        fin = texte.rindex("}")
+        rep = json.loads(texte[deb:fin + 1])
+    except (ValueError, json.JSONDecodeError):
+        return None, "réponse illisible"
+    if not isinstance(rep, dict) or not isinstance(rep.get("verdicts"), list):
+        return None, "réponse illisible"
+    vus = {}
+    for v in rep["verdicts"]:
+        try:
+            n = int(v["n"])
+            verdict = str(v["v"]).strip().lower()
+        except (KeyError, TypeError, ValueError):
+            return None, "entrée illisible"
+        if verdict not in ("sert", "ne sert pas", "ne vois pas") or n in vus:
+            return None, "verdict inconnu ou numéro en double"
+        vus[n] = verdict
+    if any(n not in vus for n in numeros) or any(n not in numeros for n in vus):
+        return None, "numéros manquants ou inconnus"
+    return vus, None
+
+
+def _s243_juge_tuile(api_key, png, liste_txt, numeros):
+    """UN appel au modèle des tirages pour UNE tuile. Rend (verdicts | None,
+    faute | None, jetons_in, jetons_out). Une passe — coupée = non jugée.
+    Une panne d'appel (réseau, surcharge, clé) est une faute de TUILE comme
+    une autre : rendue, jamais levée — sinon une seule panne jetait toutes
+    les tuiles déjà jugées et payées (revue adverse du 24.08)."""
+    try:
+        client = anthropic.Anthropic(api_key=api_key, timeout=600.0)
+        rep = client.messages.create(
+            model=_S243_MODELE, max_tokens=8000,
+            messages=[{"role": "user", "content": [
+                {"type": "text", "text": _S243_DEMANDE + liste_txt},
+                {"type": "image", "source": {"type": "base64",
+                                             "media_type": "image/png",
+                                             "data": base64.b64encode(png).decode()}}]}])
+    except Exception as e:
+        return None, "panne d'appel : %s" % type(e).__name__, 0, 0
+    j_in = getattr(rep.usage, "input_tokens", 0) or 0
+    j_out = getattr(rep.usage, "output_tokens", 0) or 0
+    if rep.stop_reason == "max_tokens":
+        return None, "réponse coupée", j_in, j_out
+    texte = "".join(b.text for b in rep.content if getattr(b, "type", "") == "text")
+    verdicts, faute = _s243_depouille(texte, numeros)
+    return verdicts, faute, j_in, j_out
+
+
+def _s243_point_sur_trace(path):
+    it = path["items"][0]
+    if it[0] == "l":
+        return ((it[1].x + it[2].x) / 2, (it[1].y + it[2].y) / 2)
+    if it[0] == "re":
+        return (it[1].x0, (it[1].y0 + it[1].y1) / 2)
+    if it[0] == "qu":
+        return (it[1].ul.x, it[1].ul.y)
+    return (it[1].x, it[1].y)
+
+
+def _s243_points_candidats(path):
+    """Les points possibles où poser la gomme, tous SUR la géométrie de CE
+    tracé. Le premier est le point d'hier (_s243_point_sur_trace)."""
+    pts = [_s243_point_sur_trace(path)]
+    for it in path["items"]:
+        if it[0] == "l":
+            pts += [(it[1].x, it[1].y), (it[2].x, it[2].y)]
+        elif it[0] == "re":
+            r = it[1]
+            pts += [((r.x0 + r.x1) / 2, r.y0), (r.x1, (r.y0 + r.y1) / 2),
+                    ((r.x0 + r.x1) / 2, r.y1), (r.x0, r.y0), (r.x1, r.y0),
+                    (r.x0, r.y1), (r.x1, r.y1)]
+        elif it[0] == "qu":
+            q = it[1]
+            pts += [(q.ul.x, q.ul.y), (q.ur.x, q.ur.y),
+                    (q.ll.x, q.ll.y), (q.lr.x, q.lr.y)]
+        else:
+            pts.append((it[1].x, it[1].y))
+    return pts
+
+
+def _s243_point_choisi(path, a_eviter):
+    """Le point de gomme qui ne touche AUCUNE boîte à préserver ; à défaut
+    le point d'hier, et l'appelant le compte (gommes_sans_abri). Condition :
+    la gomme REMOVE_IF_TOUCHED emporte TOUT tracé touché par son point, pas
+    seulement sa cible. Effet : le point se pose à l'écart des tracés
+    préservés. Pourquoi : revue adverse du 24.08 (un trait utile croisant
+    le point d'hier partait avec le décor, en silence)."""
+    for (x, y) in _s243_points_candidats(path):
+        r = (x - .3, y - .3, x + .3, y + .3)
+        if not any(_s243_proche(r, b, 0) for b in a_eviter):
+            return (x, y), True
+    return _s243_point_sur_trace(path), False
+
+
+def _s243_proche(a, b, d):
+    return not (a[2] + d < b[0] or b[2] + d < a[0]
+                or a[3] + d < b[1] or b[3] + d < a[1])
+
+
+def _s243_amas(items):
+    groupes = []
+    for r in items:
+        pris = None
+        for g in groupes:
+            if any(_s243_proche(r, x, _S243_COLLE) for x in g):
+                if pris is None:
+                    g.append(r)
+                    pris = g
+                else:
+                    pris.extend(g)
+                    g.clear()
+        if pris is None:
+            groupes.append([r])
+    out = []
+    for g in groupes:
+        if g:
+            out.append((min(r[0] for r in g), min(r[1] for r in g),
+                        max(r[2] for r in g), max(r[3] for r in g)))
+    return out
+
+
+def _s243_symbiose(content, filename, result, api_key):
+    """L'étage entier. Ne lève JAMAIS vers /parse : toute panne rend le
+    résultat d'aujourd'hui avec l'erreur DITE dans `symbiose`."""
+    info = {"tuiles_jouees": 0, "tuiles_non_jugees": 0, "familles_jugees": 0,
+            "textes_juges": 0, "decors_traces": 0, "decors_textes": 0,
+            "recuperees": 0, "jetons_entree": 0, "jetons_sortie": 0}
+    try:
+        images = result.get("images") or []
+        pages_ex = sorted({int(f["page"]) for f in images})
+        if not pages_ex:
+            info["erreur"] = "aucune découpe — étage sans objet"
+            result["symbiose"] = info
+            return result
+        doc = fitz.open(stream=content, filetype="pdf")
+
+        # ── (1) LE MODÈLE VISE — un jugement par famille de jumeaux ──
+        familles_doc = {}          # famille -> bbox représentant (page, bbox)
+        textes_doc = []            # (page, bbox, txt)
+        for pno in pages_ex:
+            traces, textes = _s243_items_de_page(doc[pno - 1])
+            for bb, fam in traces.items():
+                familles_doc.setdefault(fam, (pno, bb))
+            textes_doc += [(pno, bb, t) for bb, t in textes]
+        info["familles_jugees"] = len(familles_doc)
+        info["textes_juges"] = len(textes_doc)
+        elems = [("trace", fam, pno, bb) for fam, (pno, bb) in familles_doc.items()] \
+            + [("texte", None, pno, bb) for pno, bb, _t in textes_doc]
+        verdict_fam, verdict_txt = {}, {}
+        par_page = {}
+        for e in elems:
+            par_page.setdefault(e[2], []).append(e)
+        num = 0
+        for pno, lot_page in sorted(par_page.items()):
+            lot_page.sort(key=lambda e: ((e[3][1] + e[3][3]) / 2, e[3][0]))
+            for i0 in range(0, len(lot_page), _S243_TUILE_MAX):
+                lot = lot_page[i0:i0 + _S243_TUILE_MAX]
+                nums = list(range(num + 1, num + 1 + len(lot)))
+                num += len(lot)
+                png = _s243_tuile_png(doc[pno - 1],
+                                      list(zip(nums, [e[3] for e in lot])))
+                liste_txt = " · ".join(
+                    "T%d (%.0f×%.0f pt)" % (n, e[3][2] - e[3][0], e[3][3] - e[3][1])
+                    for n, e in zip(nums, lot))
+                verdicts, faute, j_in, j_out = _s243_juge_tuile(
+                    api_key, png, liste_txt, nums)
+                info["jetons_entree"] += j_in
+                info["jetons_sortie"] += j_out
+                # v2.43 — UNE reprise par tuile, bornée et dite : une forme
+                # cassée se rejoue une fois ; si elle casse encore, la tuile
+                # est NON JUGÉE et DITE. Condition : première passe en faute.
+                # Effet : un second appel, jamais plus. Pourquoi : montage du
+                # 24.08, une tuile sur deux illisible au premier vrai appel.
+                if verdicts is None:
+                    verdicts, faute2, j_in2, j_out2 = _s243_juge_tuile(
+                        api_key, png, liste_txt, nums)
+                    info["jetons_entree"] += j_in2
+                    info["jetons_sortie"] += j_out2
+                    info.setdefault("reprises", 0)
+                    info["reprises"] += 1
+                    faute = faute2 if verdicts is None else faute
+                if verdicts is None:
+                    info["tuiles_non_jugees"] += 1
+                    info.setdefault("fautes", []).append(faute)
+                    continue
+                info["tuiles_jouees"] += 1
+                for n, e in zip(nums, lot):
+                    if e[0] == "trace":
+                        verdict_fam[e[1]] = verdicts[n]
+                    else:
+                        verdict_txt[(e[2], e[3])] = verdicts[n]
+
+        # ── (2) LE CODE DÉCIDE — le caviardage des décors ──
+        for pno in pages_ex:
+            page = doc[pno - 1]
+            n_tr = 0
+            dessins = page.get_drawings()
+            a_eviter, cibles = [], []
+            for path in dessins:
+                r = path["rect"]
+                bb = (round(r.x0, 2), round(r.y0, 2), round(r.x1, 2), round(r.y1, 2))
+                if verdict_fam.get(_s243_famille(bb)) == "ne sert pas":
+                    cibles.append(path)
+                else:
+                    a_eviter.append((r.x0 - .3, r.y0 - .3, r.x1 + .3, r.y1 + .3))
+            for path in cibles:
+                (x, y), abri = _s243_point_choisi(path, a_eviter)
+                if not abri:
+                    info["gommes_sans_abri"] = info.get("gommes_sans_abri", 0) + 1
+                page.add_redact_annot(fitz.Rect(x - .3, y - .3, x + .3, y + .3))
+                n_tr += 1
+            if n_tr:
+                page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE,
+                                      graphics=fitz.PDF_REDACT_LINE_ART_REMOVE_IF_TOUCHED,
+                                      text=fitz.PDF_REDACT_TEXT_NONE)
+                # v2.43 — la gomme DÉCLARE ce qu'elle a réellement emporté
+                # (famille de la règle 17 : une gomme qui prend plus que sa
+                # cible doit se voir). Attendu = cibles posées ; emporté =
+                # tracés réellement partis. Pourquoi : revue adverse du 24.08.
+                emp = len(dessins) - len(page.get_drawings())
+                info["caviardage_attendu"] = info.get("caviardage_attendu", 0) + n_tr
+                info["caviardage_emporte"] = info.get("caviardage_emporte", 0) + emp
+            info["decors_traces"] += n_tr
+            n_tx = 0
+            for (p2, bb), v in verdict_txt.items():
+                if p2 == pno and v == "ne sert pas":
+                    page.add_redact_annot(fitz.Rect(*bb))
+                    n_tx += 1
+            if n_tx:
+                page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE,
+                                      graphics=fitz.PDF_REDACT_LINE_ART_NONE)
+            info["decors_textes"] += n_tx
+
+        # ── (3) R3 — la seconde passe du serveur sur l'espace libéré ──
+        idx = max((int(f.get("index", -1)) for f in images), default=-1) + 1
+        for pno in pages_ex:
+            page = doc[pno - 1]
+            cadres_p = [[float(v) for v in f["cadre"]]
+                        for f in images if int(f["page"]) == pno]
+            libres = []
+            traces, textes = _s243_items_de_page(page)
+            for b in page.get_text("dict")["blocks"]:
+                if b["type"] == 1:
+                    traces[tuple(b["bbox"])] = None
+            for bb in list(traces.keys()) + [t[0] for t in textes]:
+                cx, cy = (bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2
+                if not any(c[0] <= cx <= c[2] and c[1] <= cy <= c[3]
+                           for c in cadres_p):
+                    libres.append(bb)
+            for env in _s243_amas(libres):
+                if (env[2] - env[0]) < _S243_MIN_COTE or \
+                   (env[3] - env[1]) < _S243_MIN_COTE or \
+                   (env[2] - env[0]) * (env[3] - env[1]) < _S243_MIN_AIRE:
+                    continue
+                m = 6.0
+                reg = (max(0, env[0] - m), max(0, env[1] - m),
+                       min(page.rect.width, env[2] + m),
+                       min(page.rect.height, env[3] + m))
+                w, h = reg[2] - reg[0], reg[3] - reg[1]
+                if w < 8 or h < 8:
+                    continue
+                d2 = fitz.open()
+                p3 = d2.new_page(width=w, height=h)
+                p3.show_pdf_page(fitz.Rect(0, 0, w, h), doc, pno - 1,
+                                 clip=fitz.Rect(*reg))
+                sous = parse_pdf(d2.tobytes(), filename)
+                d2.close()
+                for f in (sous.get("images") or []):
+                    c = [float(v) for v in f["cadre"]]
+                    f["cadre"] = [c[0] + reg[0], c[1] + reg[1],
+                                  c[2] + reg[0], c[3] + reg[1]]
+                    f["page"] = pno
+                    f["index"] = idx
+                    f["symbiose_recuperee"] = True
+                    idx += 1
+                    images.append(f)
+                    info["recuperees"] += 1
+        doc.close()
+        result["images"] = images
+        result["num_images"] = len(images)
+        result["symbiose"] = info
+        return result
+    except Exception as e:
+        info["erreur"] = "étage en panne — parse d'aujourd'hui rendu : %s" % e
+        result["symbiose"] = info
+        return result
+
+
 @app.post("/parse")
-async def parse_document(file: UploadFile = File(...)):
+async def parse_document(file: UploadFile = File(...),
+                         api_key: str = Form(None)):
     """
     Reçoit un PDF, un DOCX, ou tout format bureautique lisible par LibreOffice
     (odt, doc, rtf…).
@@ -2231,8 +2603,14 @@ async def parse_document(file: UploadFile = File(...)):
         return result
 
     # PDF : extraction directe PyMuPDF (images raster + figures vectorielles)
+    # v2.43 — avec une clé, l'étage de la symbiose ; sans clé, rien ne change.
+    # Condition : api_key présent. Effet : décors jugés puis gommés, découpes
+    # récupérées ajoutées au tableau. Pourquoi : JOURNAL_BACKEND_v2_43.md.
     if ext == "pdf":
-        return parse_pdf(content, filename)
+        result = parse_pdf(content, filename)
+        if api_key:
+            result = _s243_symbiose(content, filename, result, api_key)
+        return result
 
     # Parser le DOCX
     try:
