@@ -239,7 +239,43 @@ PDF_B64_MAX = 4_000_000  # ~3 Mo de PDF, une trentaine de pages illustrées
 #   ⛔ LA DIVERGENCE EST ÉCRITE À L'ENDROIT QUI DÉCIDE : voir `_v238_champs`.
 #   (voir JOURNAL BACKEND v2.38)
 # ═══════════════════════════════════════════════════════════════════════════
-VERSION = "2.43"
+# v2.44 — R1 : /parse NE BLOQUE PLUS LE SERVICE (25.08.2026)
+#
+#   CE QUI CHANGE, ET C'EST DEUX MOTS. `/parse` était déclarée `async def` et
+#   faisait tout son travail de façon bloquante : la boucle qui distribue TOUTES
+#   les requêtes était occupée, et le service ne répondait plus à rien — pas même
+#   à /health, qui est pourtant déclarée sans `async`.
+#   Elle est désormais déclarée SANS `async`, et son unique `await`
+#   (`content = await file.read()`) devient `file.file.read()`.
+#   Effet : la route part au vivier de fils ; la boucle reste libre.
+#
+#   ⛔ NIVEAU 1 — la règle ne peut pas ne pas s'appliquer : un appel bloquant
+#   ajouté demain dans cette route ne pourra plus bloquer le service.
+#
+#   LA MESURE QUI LE JUSTIFIE, faite DANS L'IMAGE DE RENDER (python:3.11-slim,
+#   linux/amd64), document de 27 pages, sans clé :
+#     · témoin (async def) : 8 sondes /health MUETTES sur 14 — 57,1 %
+#     · R1 (def)           : 0 sur 13 — 0 %
+#     · R1 à 2 demandes    : 0 sur 23 · à 4 : 0 sur 42 · à 8 : 0 sur 81
+#     · vivier de fils LU dans la version installée : 40
+#   Et EN LIGNE, avant le remède : 63,6 % de sondes muettes pendant un /parse.
+#
+#   NON-RÉGRESSION, sous PyMuPDF 1.28.2 — celle qui tourne — sur QUATRE documents
+#   de formes différentes : les OCTETS BRUTS rendus par /parse sont IDENTIQUES
+#   avec et sans `async`. Pas « équivalents » : identiques.
+#     cp-11 (4 figures) 212 094 o · EvalSerie1maths5P (70 figures) 22 095 756 o
+#     Serie1verbes5P (1 figure) 72 946 o · construit sans figure 487 o
+#
+#   ⛔ CE QUE R1 NE FAIT PAS. Elle ne raccourcit pas le travail : 10,01 s contre
+#   10,02 s. Le serveur cesse de se TAIRE, il ne va pas plus vite.
+#
+#   ⛔ CE QUI RESTE DÉCLARÉ. Les durées et le point de rupture en charge sont
+#   mesurés dans un conteneur dont la mémoire et les cœurs viennent de Docker
+#   Desktop, PAS de l'offre Render. Ce qui transfère : les versions, la capacité
+#   du vivier, et le FAIT que la boucle bloque ou non.
+#   (voir PANEL_SERVEUR_MUET.md, portes 2 et 3)
+# ═══════════════════════════════════════════════════════════════════════════
+VERSION = "2.44"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # v2.34 — C11 : UN CADRE SANS DESSIN N'EST PAS UNE FIGURE
@@ -304,6 +340,37 @@ try:
         EMPREINTE = _hl.sha256(_f.read()).hexdigest()[:12]
 except Exception:
     EMPREINTE = "illisible"
+# ═══════════════════════════════════════════════════════════════════════════
+# v2.44 — LE SERVEUR DIT S'IL EST TOUJOURS LE MÊME (25.08.2026)
+#
+#   POURQUOI. Le 24.08, le serveur s'est tu de t+10 s à t+247 s, est REVENU à
+#   t+258 s — donc /health répondait de nouveau — et la demande était morte avec
+#   l'ancien processus. Un signe de vie qui ne regarde que « répond-il ? »
+#   aurait dit « vivant » et laissé la page attendre sans fin.
+#   Trouvé par Catherine le 25.08 : « le signe de vie doit répondre à deux
+#   questions, pas une : est-il vivant, et est-ce toujours lui. »
+#
+#   CE QUE C'EST. Une valeur fabriquée AU DÉMARRAGE DU PROCESSUS. Elle change
+#   chaque fois que le processus meurt et repart — c'est exactement le critère :
+#   « le processus qui portait ma demande n'est plus là ».
+#
+#   ⛔ CE QUE CE N'EST PAS. Ce n'est pas RENDER_INSTANCE_ID : celui-là change
+#   quand l'INSTANCE est remplacée, pas forcément quand le processus redémarre
+#   à l'intérieur. Il est servi EN PLUS, comme information, jamais comme juge.
+#
+#   ⛔ SA LIMITE, INSCRITE ET NON RÉSOLUE. Avec PLUSIEURS processus, chacun
+#   aurait la sienne et les sondes tomberaient tantôt sur l'un tantôt sur
+#   l'autre : la page annoncerait un redémarrage à chaque sonde. Aujourd'hui
+#   WEB_CONCURRENCY=1 et le remède « monter les processus » est écarté (mesuré :
+#   il s'effondre à deux demandes simultanées, 58,3 % de silence). Le jour où on
+#   monterait les processus, CETTE QUESTION SE REPOSE.
+#
+#   COÛT. Aucune dépendance nouvelle (uuid est déjà importé), aucun coût par
+#   appel : douze caractères dans une réponse que la page demande déjà.
+# ═══════════════════════════════════════════════════════════════════════════
+DEMARRAGE = uuid.uuid4().hex[:12]
+INSTANCE_HEBERGEUR = os.environ.get("RENDER_INSTANCE_ID") or "non fourni"
+
 # v2.29 — LE SERVEUR ANNONCE AUSSI AVEC QUOI IL LIT (11.08.2026). Condition : le
 # module se charge. Effet : la version de la bibliothèque d'extraction est lue
 # UNE fois et servie par /health — deux machines qui comptent différemment se
@@ -2566,7 +2633,7 @@ def _s243_symbiose(content, filename, result, api_key):
 
 
 @app.post("/parse")
-async def parse_document(file: UploadFile = File(...),
+def parse_document(file: UploadFile = File(...),
                          api_key: str = Form(None)):
     """
     Reçoit un PDF, un DOCX, ou tout format bureautique lisible par LibreOffice
@@ -2575,7 +2642,7 @@ async def parse_document(file: UploadFile = File(...),
     type d'exercice détecté, et positions relatives.
     ODT : converti en PDF (LibreOffice) puis traité par le pipeline PDF.
     """
-    content = await file.read()
+    content = file.file.read()
     filename = file.filename or "document"
     ext = filename.rsplit(".", 1)[-1].lower()
 
@@ -3905,6 +3972,12 @@ def health():
     # DANS le fichier déployé, jamais recopiée à la main : c'est ce qui
     # permet de savoir, en ligne, laquelle tourne vraiment.
     return {"status": "ok", "version": VERSION, "empreinte": EMPREINTE, "lecteur_pdf": LECTEUR_PDF,
+            # v2.44 — change à CHAQUE démarrage du processus : c'est ce qui permet
+            # à la page de savoir que sa demande est morte avec l'ancien serveur.
+            "instance": DEMARRAGE,
+            # v2.44 — information seulement : change au REMPLACEMENT de l'instance,
+            # pas au redémarrage du processus. Ne juge rien.
+            "instance_hebergeur": INSTANCE_HEBERGEUR,
             "grilles": (getattr(_grilles, "VERSION", "inconnue")
                         if GRILLES_ACTIVES else "absent"),
             "formes": (getattr(_formes, "VERSION", "inconnue")
