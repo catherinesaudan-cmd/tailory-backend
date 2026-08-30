@@ -177,6 +177,28 @@ V2.3 (retours essais 25-29) :
       - elle n'appartient pas à une famille de ≥ 3 lignes parallèles de même
         longueur (lignes d'écriture, grilles) — les segments à mesurer ont
         des longueurs toutes différentes, c'est le principe de l'exercice.
+
+V2.45 (30.08.2026) — LE RÉGIME B DEVIENT LA PRODUCTION, VOLET 1 (SERVEUR SEUL).
+  Arbitrage de Catherine du 30.08 au soir, après la vague 1 du panel
+  (VERDICT_PANEL_VAGUE1_30-08.md) ; plan des gestes validé
+  (PLAN_GESTES_B_PRODUCTION_30-08.md). Deux gestes, tout est AJOUT :
+  S1 — les supports non transmis deviennent des figures : toute grille
+      déclarée d'une page de contenu non couverte par une figure part en
+      figure (découpe 2x + photographie _v238_champs). Un tableau n'y part
+      que s'il porte moins de 6 mots (la borne mots_taches V2.21) : un
+      tableau de MOTS reste au texte — mesuré le 30.08 : la grille de la
+      souris porte 0 mot (figure), l'en-tête i-profs 23 (texte). Le cadre
+      suit le DESSIN : bord droit étendu aux mots chevauchants (+0,34 case)
+      — le geste éprouvé de la vague (la 7e colonne de la souris, T-1).
+      Les ajouts passent APRÈS poser_ancres : le champ text NE BOUGE PAS.
+  S2 — chaque support reçoit son texte sous la marque de Catherine :
+      champ nouveau `supports_marques` = les passages
+      ⟦support N — à lire seulement⟧…⟦/support⟧ dans l'ordre de lecture,
+      l'algorithme de la fabrique de la vague porté tel quel — le juge est
+      la vague : figures et blocs au caractère près (TEMOINS_VOLET1_SERVEUR_30-08.md).
+  Ce que 2.45 ne touche pas : le champ text · les découpes existantes (les
+  défauts inscrits — cerises voie origine, 4 rogné, pions — ont leurs
+  chantiers) · les ancres (ne voyagent pas pour un PDF, inscrit au plan).
 """
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
@@ -275,7 +297,7 @@ PDF_B64_MAX = 4_000_000  # ~3 Mo de PDF, une trentaine de pages illustrées
 #   du vivier, et le FAIT que la boucle bloque ou non.
 #   (voir PANEL_SERVEUR_MUET.md, portes 2 et 3)
 # ═══════════════════════════════════════════════════════════════════════════
-VERSION = "2.44"
+VERSION = "2.45"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # v2.34 — C11 : UN CADRE SANS DESSIN N'EST PAS UNE FIGURE
@@ -1558,6 +1580,8 @@ def parse_pdf(content: bytes, filename: str):
     n_ancres = 0               # v2.36 — marqueurs de position posés
     n_ancres_hors = 0          # v2.36 — figures sans ancre, comptées à part
     corrige = pages_de_corrige(doc)   # V2.20 — figures ET texte de ces pages restent dehors
+    _s245_ajouts = {}        # v2.45 — index ajouté -> grille d'origine (S1)
+    _s245_grilles_pos = []   # v2.45 — grilles des pages de contenu (S2)
 
     for pno, page in enumerate(doc):
         if (pno + 1) in corrige:      # V2.20 — page de corrigé : rien n'en part
@@ -2042,6 +2066,262 @@ def parse_pdf(content: bytes, filename: str):
 
         full_text.append(texte_page)
 
+        # ══ v2.45 — S1 : LES SUPPORTS NON TRANSMIS DEVIENNENT DES FIGURES ══
+        # (voir l'en-tête ; le texte de la page est DÉJÀ posé : rien n'y bouge)
+        if GRILLES_ACTIVES and grilles_page:
+            try:
+                _s245_candidats = []
+                for _g45 in grilles_page:
+                    _r45 = fitz.Rect(_g45["rect"]) & page.rect
+                    if _r45.is_empty:
+                        continue
+                    _couv45 = False
+                    for _f45 in images:
+                        if _f45.get("page") != pno + 1:
+                            continue
+                        _i45 = _r45 & fitz.Rect(_f45["cadre"])
+                        if not _i45.is_empty and _i45.get_area() >= 0.8 * _r45.get_area():
+                            _couv45 = True
+                            break
+                    if _couv45:
+                        continue
+                    if _g45.get("nature") == "tableau":
+                        _t45 = page.get_text("text", clip=_r45)
+                        _m45 = len(re.findall(r"[A-Za-zàâçéèêëîïôöûüù]{2,}", _t45))
+                        if _m45 >= 6:
+                            continue    # un tableau de MOTS reste au texte
+                    _s245_candidats.append((_r45.y0, _r45.x0, _g45, _r45))
+                for _y45, _x45, _g45, _r45 in sorted(_s245_candidats,
+                                                     key=lambda c: (c[0], c[1])):
+                    clip45 = fitz.Rect(_r45)
+                    # le cadre suit le DESSIN : bord droit étendu aux mots
+                    # chevauchants (la 7e colonne de la souris, T-1)
+                    _cl45 = (_g45.get("case_l_mm") or 8.0) * 72 / 25.4
+                    _mx45 = clip45.x1
+                    for _w45 in page.get_text("words"):
+                        _wr45 = fitz.Rect(_w45[:4])
+                        _cy45 = (_wr45.y0 + _wr45.y1) / 2
+                        if (clip45.y0 <= _cy45 <= clip45.y1
+                                and _wr45.x1 > clip45.x1 - 0.2 * _cl45
+                                and _wr45.x0 < clip45.x1 + 1.2 * _cl45):
+                            _mx45 = max(_mx45, _wr45.x1 + 0.34 * _cl45)
+                    clip45.x1 = _mx45
+                    clip45 = fitz.Rect(clip45.x0 - 1.5, clip45.y0 - 1.5,
+                                       clip45.x1 + 1.5, clip45.y1 + 1.5) & page.rect
+                    pix45 = page.get_pixmap(clip=clip45, matrix=fitz.Matrix(2, 2))
+                    if pix45.width < 8 or pix45.height < 8:
+                        continue
+                    _png45 = pix45.tobytes("png")
+                    _t45c = page.get_text("text", clip=clip45)
+                    _mots45 = len(re.findall(r"[A-Za-zàâçéèêëîïôöûüù]{2,}", _t45c))
+                    _extra45, _voie45 = _v238_champs(doc, page, clip45, _mots45)
+                    _fig45 = {"cadre": [clip45.x0, clip45.y0, clip45.x1, clip45.y1],
+                              "sceau": _hl.sha256(_png45).hexdigest()[:12]}
+                    if _mots45 >= 6:
+                        _fig45["mots_taches"] = _mots45
+                    _fig45.update({"index": idx, "page": pno + 1,
+                                   "data": "data:image/png;base64,"
+                                           + base64.b64encode(_png45).decode(),
+                                   "w": pix45.width, "h": pix45.height,
+                                   "w_mm": round(clip45.width * 25.4 / 72, 1),
+                                   "h_mm": round(clip45.height * 25.4 / 72, 1)})
+                    _fig45.update(_extra45)
+                    images.append(_fig45)
+                    _v238_compte[_voie45] = _v238_compte.get(_voie45, 0) + 1
+                    _s245_ajouts[idx] = {"page": pno + 1,
+                                         "rect": list(fitz.Rect(_g45["rect"]))}
+                    idx += 1
+            except Exception:
+                pass
+        if GRILLES_ACTIVES and grilles_page:
+            for _g45 in grilles_page:
+                _s245_grilles_pos.append({
+                    "page": pno + 1, "rect": list(fitz.Rect(_g45["rect"])),
+                    "nature": _g45.get("nature"),
+                    "case_l_mm": _g45.get("case_l_mm"),
+                    "case_h_mm": _g45.get("case_h_mm")})
+
+    # ══ v2.45 — S2 : CHAQUE SUPPORT REÇOIT SON TEXTE SOUS LA MARQUE ══════
+    # L'algorithme est celui de la fabrique de la vague 1, porté tel quel
+    # (fabrique_charges.py, 30.08) : le juge est la vague — les blocs rendus
+    # ici doivent être ceux des fichiers B_marques_*, au caractère près.
+    # Le champ `text` ne bouge pas ; seuls les BLOCS sortent, dans l'ordre
+    # de lecture. En cas d'accroc, le champ dit pourquoi au lieu de se taire.
+    _s245_marques = ""
+    try:
+        _S245_TOK = re.compile(r"\[TAILORY_IMG_(\d+)\]")
+        _S245_DECL = re.compile(r"^\[(quadrillage|tableau) .*\]")
+        _S245_COMPT = re.compile(r"^\[comptage non transmis[^\]]*\]")
+        _S245_CELL = re.compile(r"^[^|]*\|[^|]*\|")
+        _s245_texte = "\n".join(full_text)
+        _s245_transmises = [f for f in images if f["index"] not in _s245_ajouts]
+        _s245_pages_contenu = sorted({f["page"] for f in images}
+                                     | {g["page"] for g in _s245_grilles_pos})
+
+        def _s245_centre_dans(bb, cadre, marge=1.0):
+            cx, cy = (bb[0] + bb[2]) / 2.0, (bb[1] + bb[3]) / 2.0
+            return (cadre[0] - marge <= cx <= cadre[2] + marge
+                    and cadre[1] - marge <= cy <= cadre[3] + marge)
+
+        def _s245_couvert(rect, cadre, seuil=0.8):
+            r = fitz.Rect(rect) & fitz.Rect(cadre)
+            if r.is_empty:
+                return False
+            a = fitz.Rect(rect).get_area()
+            return a > 0 and r.get_area() >= seuil * a
+
+        _s245_recolte = {}
+        for _p45 in _s245_pages_contenu:
+            if _p45 in corrige or _p45 > len(doc):
+                continue
+            _page45 = doc[_p45 - 1]
+            _gr45 = [fitz.Rect(g["rect"]) for g in _s245_grilles_pos
+                     if g["page"] == _p45]
+            _d45 = _page45.get_text("dict")
+            for _b45 in _d45["blocks"]:
+                if _b45.get("type") != 0:
+                    continue
+                for _li45 in _b45["lines"]:
+                    _t45 = " ".join(s["text"].strip() for s in _li45["spans"]
+                                    if s["text"].strip())
+                    _t45 = re.sub(r"\s+", " ", _t45).strip()
+                    if not _t45:
+                        continue
+                    _bb45 = _li45["bbox"]
+                    if any(_s245_centre_dans(_bb45, [r.x0, r.y0, r.x1, r.y1])
+                           for r in _gr45):
+                        continue
+                    for _f45 in _s245_transmises:
+                        if (_f45["page"] == _p45
+                                and _s245_centre_dans(_bb45, _f45["cadre"])):
+                            _s245_recolte.setdefault(_p45, []).append(
+                                [_t45, _f45["index"], 1])
+                            break
+
+        def _s245_sans_espace(t):
+            return t.replace(" ", "")
+
+        def _s245_apparie(nu, pno1):
+            pool = _s245_recolte.get(pno1, [])
+            nu_c = _s245_sans_espace(nu)
+            for e in pool:
+                if e[2] and _s245_sans_espace(e[0]) == nu_c:
+                    e[2] = 0
+                    return e[1]
+            for sup in {e[1] for e in pool if e[2]}:
+                libres = [e for e in pool if e[2] and e[1] == sup]
+                reste = nu
+                pris = []
+                change = True
+                while reste and change:
+                    change = False
+                    for e in libres:
+                        ec = _s245_sans_espace(e[0])
+                        if e[2] and _s245_sans_espace(reste).startswith(ec):
+                            pris.append(e)
+                            rc = _s245_sans_espace(reste)[len(ec):]
+                            j = 0
+                            k = 0
+                            while (j < len(reste)
+                                   and k < len(_s245_sans_espace(reste)) - len(rc)):
+                                if reste[j] != " ":
+                                    k += 1
+                                j += 1
+                            reste = reste[j:].strip()
+                            e[2] = 0
+                            change = True
+                            break
+                if not reste and pris:
+                    return sup
+                for e in pris:
+                    e[2] = 1
+            return None
+
+        _s245_file = sorted(_s245_grilles_pos,
+                            key=lambda g: (g["page"], g["rect"][1], g["rect"][0]))
+
+        def _s245_grille_suivante(pno1):
+            for g in _s245_file:
+                if g["page"] == pno1:
+                    _s245_file.remove(g)
+                    return g
+            return None
+
+        def _s245_support_de(g):
+            if g is None:
+                return None, None
+            for _ia45, _ga45 in _s245_ajouts.items():
+                if (_ga45.get("page") == g["page"]
+                        and list(fitz.Rect(_ga45["rect"])) == g["rect"]):
+                    return "ajout", _ia45
+            for f in _s245_transmises:
+                if f["page"] == g["page"] and _s245_couvert(g["rect"], f["cadre"]):
+                    return "couvert", f["index"]
+            return "libre", None
+
+        _s245_page_fig = {f["index"]: f["page"] for f in _s245_transmises}
+        _s245_sortie = []
+        _s245_bloc_tab = None
+        _s245_page_cour = (_s245_pages_contenu[0]
+                           if _s245_pages_contenu else 1)
+        _s245_ouverte = [None]
+        _s245_derniere_decl = [None]
+
+        def _s245_ferme():
+            if _s245_ouverte[0] is not None:
+                _s245_sortie.append("⟦/support⟧")
+                _s245_ouverte[0] = None
+
+        def _s245_ouvre(n):
+            if _s245_ouverte[0] != n:
+                _s245_ferme()
+                _s245_sortie.append("⟦support %d — à lire seulement⟧" % n)
+                _s245_ouverte[0] = n
+
+        for _brut45 in _s245_texte.split("\n"):
+            _toks45 = _S245_TOK.findall(_brut45)
+            if _toks45:
+                _pg45 = max(_s245_page_fig.get(int(t), _s245_page_cour)
+                            for t in _toks45)
+                if _pg45 > _s245_page_cour:
+                    _s245_page_cour = _pg45
+            _nu45 = _S245_TOK.sub("", _brut45).strip()
+            _nu45 = re.sub(r"\s+", " ", _nu45)
+            _sort45, _n45 = "garde", None
+            if _S245_DECL.match(_nu45):
+                _g45x = _s245_grille_suivante(_s245_page_cour)
+                _typ45, _n45 = _s245_support_de(_g45x)
+                _sort45 = "support" if _typ45 in ("ajout", "couvert") else "garde"
+                _s245_bloc_tab = ((_sort45, _n45)
+                                  if _g45x and _g45x.get("nature") == "tableau"
+                                  else None)
+                _s245_derniere_decl[0] = (_typ45, _n45)
+            elif _S245_COMPT.match(_nu45):
+                if (_s245_derniere_decl[0]
+                        and _s245_derniere_decl[0][0] in ("ajout", "couvert")):
+                    _sort45, _n45 = "support", _s245_derniere_decl[0][1]
+                else:
+                    _sort45 = "garde"
+            elif _S245_CELL.match(_nu45) and _s245_bloc_tab:
+                _sort45, _n45 = _s245_bloc_tab
+            else:
+                if _nu45:
+                    _s245_bloc_tab = None
+                    _sup45 = _s245_apparie(_nu45, _s245_page_cour)
+                    if _sup45 is not None:
+                        _sort45, _n45 = "support", _sup45
+            if _sort45 == "garde" or _n45 is None:
+                _s245_ferme()
+            else:
+                _s245_ouvre(_n45)
+                _s245_sortie.append(_nu45)
+        _s245_ferme()
+        _s245_b = "\n".join(_s245_sortie)
+        _s245_marques = "\n".join(re.findall(
+            r"(⟦support \d+ — à lire seulement⟧.*?⟦/support⟧)", _s245_b, re.S))
+    except Exception as _e45:
+        _s245_marques = "[supports_marques indisponibles : %s]" % _e45
+
     doc.close()
     return {
         "filename": filename,
@@ -2080,6 +2360,9 @@ def parse_pdf(content: bytes, filename: str):
         # réelle ou refus motivé.
         "formes": formes_inventaire,
         "formes_actives": FORMES_ACTIVES,
+        # v2.45 — S2 : les passages des supports sous la marque de
+        # Catherine, dans l'ordre de lecture (voir l'en-tête).
+        "supports_marques": _s245_marques,
     }
 
 # ─────────────────────────────────────────────
