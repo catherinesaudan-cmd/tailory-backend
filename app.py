@@ -18,6 +18,17 @@ Endpoints:
   POST /convert  → PDF → DOCX (existant, conservé)
   GET  /health   → vérification
 
+V2.48 (21.09.2026, § 156, DEC-1936 à 1939 — après le tirage mauvais de la 2.47, COMPTE_TIRAGE_2_47_21-09.md
+       et COMPTE_FIGURE_ENTIERE_ET_MORCEAUX_POSES_21-09.md) :
+  · une case est un rectangle (traits et rectangles seulement) : l'œil du poisson du cp-11 disparaissait à
+    l'étape « cases isolées », son cercle blanc était une case (454 px → 0, trace_oeil_poisson.py) ;
+  · l'intérieur d'une case n'est jamais effacé : une case isolée n'efface que son bord ;
+  · deux dessins qui se chevauchent ne sont jamais intrus l'un pour l'autre : les trois pions de la piste du 27b
+    n'avaient aucun morceau (la bande effaçait le pion, le pion la bande — 41 à 74 % de leur encre) ;
+  · les morceaux ramassés après la gomme portent leur propre étiquette (p<page>-g<amas>-…) et leur cadre entier
+    est ramené à la page : ils partageaient l'étiquette de vraies figures (le 82 du cp-7 : 6 récupérées).
+  Rien d'autre. La page compagne est la 10.423 (la figure entière : un seul marqueur, le code pose tout).
+
 V2.11 (chantier 6.8 — segments courts étiquetés, 31 juillet 2026) :
   · Un trait fin de 7 à 14 mm devient une figure candidate s'il porte une
     ÉTIQUETTE DE SÉRIE juste à sa gauche — une lettre ou un chiffre seul
@@ -335,7 +346,7 @@ PDF_B64_MAX = 4_000_000  # ~3 Mo de PDF, une trentaine de pages illustrées
 #   0 grille déclarée : rang suivant, non ouvert).
 #   (voir JOURNAL BACKEND v2.46)
 # ═══════════════════════════════════════════════════════════════════════════
-VERSION = "2.47"
+VERSION = "2.48"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # v2.34 — C11 : UN CADRE SANS DESSIN N'EST PAS UNE FIGURE
@@ -1741,7 +1752,8 @@ def _v247_cases_et_decor(page):
             continue
         t = (page.get_text(clip=r) or '').strip()
         if (not t) or _v21_est_receptacle(t):
-            rectangle = all(it[0] in ('l', 're', 'c', 'qu') for it in d.get('items', []))
+            # v2.48 — une case où l'élève écrit est un rectangle : traits et rectangles seulement ; un œil est rond, ce n'est pas une case (DEC-1937)
+            rectangle = all(it[0] in ('l', 're') for it in d.get('items', []))
             if rectangle and d.get('fill') in (None, (1.0, 1.0, 1.0)):
                 cases.append(fitz.Rect(r))
     return cases, decor
@@ -2033,9 +2045,11 @@ def _v247_decouper_page(page, fenetres, tableaux, mots, L, texte, cases, decor):
         # l'intérieur n'est jamais effacé : une fenêtre qui contient W n'est pas un intrus ;
         # une fenêtre contenue dans une fenêtre-tableau non plus (elle lui appartient)
         # un tableau qui tient la moitié de W n'est pas non plus un intrus pour W : ce que W porte lui appartient
+        # v2.48 — deux dessins qui se chevauchent ne sont jamais des intrus l'un pour l'autre : une fenêtre qui croise W (aire non nulle) n'est pas retirée de W (DEC-1938)
         autres = [g['clip'] for j, g in enumerate(fenetres) if j != k and not g['clip'].contains(W)
                   and not (f.get('tableau') and W.contains(g['clip']))
-                  and not (g.get('tableau') and (W & g['clip']).get_area() >= 0.5 * W.get_area())]
+                  and not (g.get('tableau') and (W & g['clip']).get_area() >= 0.5 * W.get_area())
+                  and (g['clip'] & W).is_empty]
         O = masque_de(autres)
         F0 = E & ~(T | D | O)
         lab0 = _v247_etiqueter(_v247_dilate(F0, 1, _np247.ones_like(E, dtype=bool)))
@@ -2056,7 +2070,8 @@ def _v247_decouper_page(page, fenetres, tableaux, mots, L, texte, cases, decor):
                     dehors += 1
             if dehors == 0:
                 cases_isolees.append(c)
-        C = _v247_dilate(masque_de(cases_isolees), 2, E)
+        # v2.48 — on n'efface jamais ce qu'il y a dans une case : une case isolée n'efface que son bord, l'anneau de ± 2 px autour de sa boîte (DEC-1937)
+        C = masque_de(cases_isolees, anneau=2)
         I = T | C | D | O
         F = E & ~I
         lab = _v247_etiqueter(_v247_dilate(F, 1, _np247.ones_like(E, dtype=bool)))
@@ -3482,6 +3497,11 @@ def _s243_amas(items):
     return out
 
 
+def _s248_etiquette_recuperee(pno, n_amas, fig):
+    """v2.48 (DEC-1939) : l'étiquette d'un morceau ramassé après la gomme — sa page, son amas, sa marque de mini-page ; jamais celle d'une figure de la page."""
+    return "p%d-g%d-%s" % (int(pno), int(n_amas), fig or "f0")
+
+
 def _s243_symbiose(content, filename, result, api_key):
     """L'étage entier. Ne lève JAMAIS vers /parse : toute panne rend le
     résultat d'aujourd'hui avec l'erreur DITE dans `symbiose`."""
@@ -3610,7 +3630,7 @@ def _s243_symbiose(content, filename, result, api_key):
                 if not any(c[0] <= cx <= c[2] and c[1] <= cy <= c[3]
                            for c in cadres_p):
                     libres.append(bb)
-            for env in _s243_amas(libres):
+            for _n_amas, env in enumerate(_s243_amas(libres)):
                 if (env[2] - env[0]) < _S243_MIN_COTE or \
                    (env[3] - env[1]) < _S243_MIN_COTE or \
                    (env[2] - env[0]) * (env[3] - env[1]) < _S243_MIN_AIRE:
@@ -3635,6 +3655,11 @@ def _s243_symbiose(content, filename, result, api_key):
                     f["page"] = pno
                     f["index"] = idx
                     f["symbiose_recuperee"] = True
+                    # v2.48 — sa propre étiquette : un morceau ramassé après la gomme n'est jamais de la même figure qu'un morceau de la vraie page (DEC-1939)
+                    f["figure"] = _s248_etiquette_recuperee(pno, _n_amas, f.get("figure"))
+                    if f.get("entier_cadre"):
+                        _ec = [float(v) for v in f["entier_cadre"]]
+                        f["entier_cadre"] = [_ec[0] + reg[0], _ec[1] + reg[1], _ec[2] + reg[0], _ec[3] + reg[1]]
                     idx += 1
                     images.append(f)
                     info["recuperees"] += 1
