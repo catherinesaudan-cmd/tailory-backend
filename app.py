@@ -335,7 +335,7 @@ PDF_B64_MAX = 4_000_000  # ~3 Mo de PDF, une trentaine de pages illustrées
 #   0 grille déclarée : rang suivant, non ouvert).
 #   (voir JOURNAL BACKEND v2.46)
 # ═══════════════════════════════════════════════════════════════════════════
-VERSION = "2.46"
+VERSION = "2.47"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # v2.34 — C11 : UN CADRE SANS DESSIN N'EST PAS UNE FIGURE
@@ -1645,6 +1645,516 @@ def _v238_champs(doc, page, clip, mots_clip):
         return ({}, "aucun")
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# v2.47 — LA DÉCOUPE EN MORCEAUX (§ 152 du registre, DEC-1909 à 1916, 21.09.2026)
+# Ce que ce bloc fait, et rien d'autre (ses mots, DEC-1913) :
+#   · on coupe sans plancher : un rectangle ne prend jamais autre chose que sa
+#     figure ; sinon plusieurs rectangles qui épousent le bord de la figure ;
+#   · les morceaux partent avec leur position (`cadre`) et leur marque
+#     (`figure`, `morceau`, `n_morceaux`) ; la page les remet à leur place ;
+#   · l'intérieur d'une figure n'est jamais effacé (une fenêtre qui en contient
+#     une autre n'est pas « une autre figure » pour celle-ci) ;
+#   · les lettres et les chiffres à 6 mm ou moins du dessin partent avec la
+#     figure, à leur place ; un mot part avec une seule figure ;
+#   · jamais pris : une ligne de texte, un mot portant une ponctuation de fin
+#     (. ? ! : ; …) ;
+#   · un tableau, une grille, une rangée de bandeaux est une figure : ce qui
+#     est dedans lui appartient, quelle que soit la distance ;
+#   · le dessin, c'est la flèche qui touche la figure, la bande de cases
+#     couchée ou debout, et le pâle (tout pixel qui s'écarte du blanc) ;
+#   · pour toute figure de plus d'un morceau, `entier` (le PNG du rectangle qui
+#     contient tous ses morceaux) : le plafond se traite à l'envoi, dans la page.
+# Les déclarations sont celles du banc d'essai qui les a mesurées
+# (banc_lettres_dessin_21-09_h.py, GARDE_DEPOT_247/HYPOTHESES_2_47_DECOUPE_21-09.md).
+# Sans scipy : l'étiquetage est un union-find par segments (identique à
+# scipy.ndimage.label sur 576 fenêtres, 0 écart) ; la distance d'un mot au
+# dessin est exacte (boîte → pixel d'encre le plus proche).
+# ══════════════════════════════════════════════════════════════════════════════
+import numpy as _np247
+from PIL import Image as _Im247, ImageFilter as _If247
+
+_V247_K = 2.0                       # 144 ppp, comme la photographie du modèle
+_V247_MM = 25.4 / 72.0
+_V247_ECART = 30                    # encre = écart au blanc ≥ 30 (le pâle compte)
+_V247_BRUIT = 9                     # px² : poussières écartées
+_V247_MARGE = 20.0 / _V247_MM       # pt : la région autour d'une fenêtre (flèches, mots à 6 mm)
+_V247_DIST_MM = 6.0                 # les lettres et les chiffres à 6 mm ou moins
+_V247_PONCT = '.?!:;…'
+_V247_MOT = re.compile(r'[A-Za-zÀ-ÿ]{3,}')
+
+
+def _v247_lignes(page):
+    """Les mots de la page, et pour chacun la taille de sa ligne et le texte de sa ligne
+    (même hauteur à 50 %, écart ≤ 1,5 × hauteur)."""
+    mots = [w for w in page.get_text('words') if w[4].strip()]
+    par = list(range(len(mots)))
+
+    def tr(a):
+        while par[a] != a:
+            par[a] = par[par[a]]
+            a = par[a]
+        return a
+    for i in range(len(mots)):
+        xi0, yi0, xi1, yi1 = mots[i][:4]
+        hi = yi1 - yi0
+        for j in range(i + 1, len(mots)):
+            xj0, yj0, xj1, yj1 = mots[j][:4]
+            hj = yj1 - yj0
+            if (min(yi1, yj1) - max(yi0, yj0) >= 0.5 * min(hi, hj)
+                    and max(xj0 - xi1, xi0 - xj1) <= 1.5 * max(hi, hj)):
+                par[tr(i)] = tr(j)
+    grp = {}
+    for i in range(len(mots)):
+        grp.setdefault(tr(i), []).append(i)
+    L, texte = {}, {}
+    for g, idx in grp.items():
+        t = ' '.join(mots[j][4] for j in sorted(idx, key=lambda j: mots[j][0]))
+        for i in idx:
+            L[i] = len(idx)
+            texte[i] = t
+    return mots, L, texte
+
+
+def _v247_est_ligne(i, L, texte):
+    return L[i] >= 3 and bool(_V247_MOT.search(texte[i]))
+
+
+def _v247_est_glyphe(i, mots, L, texte):
+    """Un mot court, sans ponctuation de fin : candidat à partir avec une figure."""
+    t = mots[i][4]
+    if _v247_est_ligne(i, L, texte):
+        return False
+    return not (t and t[-1] in _V247_PONCT)
+
+
+def _v247_cases_et_decor(page):
+    cases, decor = [], []
+    for d in page.get_drawings():
+        r = d.get('rect')
+        if r is None or r.width < 8 or r.height < 8:
+            continue
+        tirets = bool(d.get('dashes')) and str(d.get('dashes')).strip() not in ('', '[] 0')
+        if tirets:
+            decor.append(fitz.Rect(r))
+            continue
+        if r.width * r.height > 40000:
+            continue
+        t = (page.get_text(clip=r) or '').strip()
+        if (not t) or _v21_est_receptacle(t):
+            rectangle = all(it[0] in ('l', 're', 'c', 'qu') for it in d.get('items', []))
+            if rectangle and d.get('fill') in (None, (1.0, 1.0, 1.0)):
+                cases.append(fitz.Rect(r))
+    return cases, decor
+
+
+def _v247_en_bande(c, cases):
+    """La bande de cases, couchée ou debout : une case n'est un intrus que seule sur sa ligne."""
+    petit = min(c.width, c.height)
+    for c2 in cases:
+        if c2 is c:
+            continue
+        if (abs(c2.height - c.height) <= 0.15 * c.height
+                and min(c.y1, c2.y1) - max(c.y0, c2.y0) >= 0.5 * min(c.height, c2.height)
+                and max(c2.x0 - c.x1, c.x0 - c2.x1) <= 1.5 * petit):
+            return True
+        if (abs(c2.width - c.width) <= 0.15 * c.width
+                and min(c.x1, c2.x1) - max(c.x0, c2.x0) >= 0.5 * min(c.width, c2.width)
+                and max(c2.y0 - c.y1, c.y0 - c2.y1) <= 1.5 * petit):
+            return True
+    return False
+
+
+def _v247_tableaux(page, cases):
+    """Un tableau, une grille, une rangée de bandeaux : (a) find_tables s'il existe ;
+    (b) les grilles de traits fins (bordures Word : rectangles remplis d'épaisseur nulle) ;
+    (c) les rangées de cellules fermées. Rend (liste de Rect, tableaux_non_cherches)."""
+    tabs, non_cherches = [], 0
+    if hasattr(page, 'find_tables'):
+        try:
+            tabs += [fitz.Rect(t.bbox) for t in page.find_tables().tables]
+        except Exception:
+            non_cherches = 1
+    else:
+        non_cherches = 1
+    tf = []
+    for d in page.get_drawings():
+        r = d.get('rect')
+        if r is None:
+            continue
+        if r.height < 1.0 and r.width >= 8:
+            tf.append(('h', round(r.x0, 0), round(r.x1, 0), (r.y0 + r.y1) / 2))
+        elif r.width < 1.0 and r.height >= 8:
+            tf.append(('v', (r.x0 + r.x1) / 2, r.y0, r.y1))
+    grp = {}
+    for t in tf:
+        if t[0] == 'h':
+            grp.setdefault((t[1], t[2]), []).append(t[3])
+    for (x0, x1), ys in grp.items():
+        if len(ys) < 3:
+            continue
+        y0, y1 = min(ys), max(ys)
+        nv = sum(1 for t in tf if t[0] == 'v' and x0 - 2 <= t[1] <= x1 + 2
+                 and t[2] >= y0 - 2 and t[3] <= y1 + 2)
+        if nv >= 2:
+            tabs.append(fitz.Rect(x0, y0, x1, y1))
+    vus = set()
+    for i, c in enumerate(cases):
+        if i in vus:
+            continue
+        grp2 = [i]
+        for j, c2 in enumerate(cases):
+            if j == i or j in vus:
+                continue
+            if ((abs(c2.height - c.height) <= 0.15 * c.height
+                 and min(c.y1, c2.y1) - max(c.y0, c2.y0) >= 0.5 * min(c.height, c2.height))
+                    or (abs(c2.width - c.width) <= 0.15 * c.width
+                        and min(c.x1, c2.x1) - max(c.x0, c2.x0) >= 0.5 * min(c.width, c2.width))):
+                grp2.append(j)
+        if len(grp2) >= 3:
+            vus.update(grp2)
+            tabs.append(fitz.Rect(min(cases[j].x0 for j in grp2), min(cases[j].y0 for j in grp2),
+                                  max(cases[j].x1 for j in grp2), max(cases[j].y1 for j in grp2)))
+    # un tableau contenu dans un autre n'est pas un second tableau
+    tabs = [t for t in tabs if not any(o is not t and o.contains(t) and o != t for o in tabs)]
+    return tabs, non_cherches
+
+
+def _v247_porte_un_glyphe(page, r):
+    """Vrai si le rectangle porte un mot court sans ponctuation (un chiffre, une étiquette) :
+    un tableau qui en porte est une figure ; un tableau qui ne porte que des lignes de texte est du texte."""
+    try:
+        mots, L, texte = _v247_lignes(page)
+    except Exception:
+        return False
+    for i, w in enumerate(mots):
+        if not _v247_est_glyphe(i, mots, L, texte):
+            continue
+        b = fitz.Rect(w[:4])
+        if r.contains(fitz.Point((b.x0 + b.x1) / 2, (b.y0 + b.y1) / 2)):
+            return True
+    return False
+
+
+def _v247_fusionner_tableaux(tabs):
+    """Deux tableaux qui se recouvrent sont un seul tableau (les cellules d'un quadrillage, les rangées et les colonnes d'une même grille)."""
+    tabs = [fitz.Rect(t) for t in tabs]
+    change = True
+    while change:
+        change = False
+        out = []
+        for t in tabs:
+            for i, o in enumerate(out):
+                if not (o & t).is_empty:
+                    out[i] = o | t
+                    change = True
+                    break
+            else:
+                out.append(t)
+        tabs = out
+    return tabs
+
+
+def _v247_au_moins(r, mini, cadre_page):
+    """Un morceau se rend à 8 px au moins (4 pt) dans chaque sens : la porte des 8 px de la 2.46 ne jette plus un trait ou un point."""
+    r = fitz.Rect(r)
+    if r.width < mini:
+        c = (r.x0 + r.x1) / 2
+        r.x0, r.x1 = c - mini / 2, c + mini / 2
+    if r.height < mini:
+        c = (r.y0 + r.y1) / 2
+        r.y0, r.y1 = c - mini / 2, c + mini / 2
+    return r & cadre_page
+
+
+def _v247_etiqueter(mask):
+    """Composantes 8-connexes d'un masque : union-find par segments (numpy)."""
+    h, w = mask.shape
+    lab = _np247.zeros((h, w), dtype=_np247.int32)
+    par = [0]
+    nxt = 1
+    prev = []
+    for y in range(h):
+        row = mask[y]
+        if not row.any():
+            prev = []
+            continue
+        d = _np247.diff(_np247.concatenate(([0], row.astype(_np247.int8), [0])))
+        starts = _np247.where(d == 1)[0]
+        ends = _np247.where(d == -1)[0]
+        cur = []
+        for s, e in zip(starts, ends):
+            lbl = 0
+            for (ps, pe, pl) in prev:
+                if ps <= e and pe >= s:
+                    if lbl == 0:
+                        lbl = pl
+                    else:
+                        a, b = lbl, pl
+                        while par[a] != a:
+                            a = par[a]
+                        while par[b] != b:
+                            b = par[b]
+                        if a != b:
+                            par[max(a, b)] = min(a, b)
+            if lbl == 0:
+                lbl = nxt
+                par.append(nxt)
+                nxt += 1
+            lab[y, s:e] = lbl
+            cur.append((s, e, lbl))
+        prev = cur
+    racine = _np247.arange(nxt)
+    for i in range(1, nxt):
+        a = i
+        while par[a] != a:
+            a = par[a]
+        racine[i] = a
+    return racine[lab]
+
+
+def _v247_coupe(R, elem, intrus, prof=0):
+    """Garde tout l'élément, retire le plus d'intrus, ≤ 6 coupes le long de lignes vides."""
+    x0, y0, x1, y1 = R
+    e = elem[y0:y1, x0:x1]
+    it = intrus[y0:y1, x0:x1]
+    if not e.any():
+        return []
+    if not it.any() or prof >= 6:
+        return [R]
+    meilleur, gain0 = None, 0
+    lig = e.any(axis=1)
+    col = e.any(axis=0)
+    tot = it.sum()
+    for y in range(1, y1 - y0):
+        if not lig[y]:
+            reste = (it[:y].sum() if e[:y].any() else 0) + (it[y:].sum() if e[y:].any() else 0)
+            gain = tot - reste
+            if gain > gain0:
+                gain0, meilleur = gain, ('h', y)
+    for x in range(1, x1 - x0):
+        if not col[x]:
+            reste = (it[:, :x].sum() if e[:, :x].any() else 0) + (it[:, x:].sum() if e[:, x:].any() else 0)
+            gain = tot - reste
+            if gain > gain0:
+                gain0, meilleur = gain, ('v', x)
+    if meilleur is None:
+        return [R]
+    if meilleur[0] == 'h':
+        y = meilleur[1]
+        return (_v247_coupe((x0, y0, x1, y0 + y), elem, intrus, prof + 1)
+                + _v247_coupe((x0, y0 + y, x1, y1), elem, intrus, prof + 1))
+    x = meilleur[1]
+    return (_v247_coupe((x0, y0, x0 + x, y1), elem, intrus, prof + 1)
+            + _v247_coupe((x0 + x, y0, x1, y1), elem, intrus, prof + 1))
+
+
+def _v247_serrer(R, elem):
+    x0, y0, x1, y1 = R
+    e = elem[y0:y1, x0:x1]
+    if not e.any():
+        return None
+    ys, xs = _np247.where(e)
+    return (int(x0 + xs.min()), int(y0 + ys.min()), int(x0 + xs.max() + 1), int(y0 + ys.max() + 1))
+
+
+def _v247_absorber(rects):
+    rects = sorted(rects, key=lambda r: -(r[2] - r[0]) * (r[3] - r[1]))
+    gardes = []
+    for r in rects:
+        if any(r[0] >= q[0] and r[1] >= q[1] and r[2] <= q[2] and r[3] <= q[3] for q in gardes):
+            continue
+        gardes.append(r)
+    return gardes
+
+
+def _v247_dilate(m, r, E):
+    return (_np247.array(_Im247.fromarray((m * 255).astype(_np247.uint8)).filter(_If247.MaxFilter(2 * r + 1))) > 0) & E
+
+
+def _v247_decouper_page(page, fenetres, tableaux, mots, L, texte, cases, decor):
+    """Les morceaux de chaque fenêtre de la page.
+    fenetres : liste de dict {clip: Rect, tableau: bool, ...} ; rend, pour chaque fenêtre,
+    {'pieces': [Rect pt], 'mots': [indices de mots], 'entier': Rect, 'sans_dessin': bool}
+    et le compte des mots attachés."""
+    K = _V247_K
+    n = len(fenetres)
+    glyphes = [i for i in range(len(mots)) if _v247_est_glyphe(i, mots, L, texte)]
+    boites = {i: fitz.Rect(mots[i][:4]) for i in glyphes}
+    # 1. l'appartenance à un tableau : sans distance
+    attribution = {}          # mot -> fenêtre
+    for k, f in enumerate(fenetres):
+        if not f.get('tableau'):
+            continue
+        T = f['clip']
+        for i in glyphes:
+            b = boites[i]
+            if i in attribution:
+                continue
+            if T.contains(fitz.Point((b.x0 + b.x1) / 2, (b.y0 + b.y1) / 2)):
+                attribution[i] = k
+    # 2. pour chaque fenêtre : la région, l'encre, les intrus, les éléments, le dessin
+    etats = []
+    for k, f in enumerate(fenetres):
+        W = f['clip']
+        R = fitz.Rect(W.x0 - _V247_MARGE, W.y0 - _V247_MARGE, W.x1 + _V247_MARGE, W.y1 + _V247_MARGE) & page.rect
+        pm = page.get_pixmap(matrix=fitz.Matrix(K, K), clip=R, alpha=False)
+        A = _np247.frombuffer(pm.samples, dtype=_np247.uint8).reshape(pm.height, pm.width, pm.n)[:, :, :3]
+        E = (255 - A.min(axis=2)) >= _V247_ECART
+        H_, W_ = E.shape
+
+        def px(bx):
+            q = bx & R
+            return (int((q.x0 - R.x0) * K), int((q.y0 - R.y0) * K),
+                    int(_np247.ceil((q.x1 - R.x0) * K)), int(_np247.ceil((q.y1 - R.y0) * K)))
+
+        def masque_de(rects, anneau=0, dil=0):
+            m = _np247.zeros_like(E)
+            for r in rects:
+                q = fitz.Rect(r) & R
+                if q.is_empty:
+                    continue
+                x0, y0 = int((q.x0 - R.x0) * K) - dil, int((q.y0 - R.y0) * K) - dil
+                x1, y1 = int(_np247.ceil((q.x1 - R.x0) * K)) + dil, int(_np247.ceil((q.y1 - R.y0) * K)) + dil
+                if anneau:
+                    m[max(0, y0 - anneau):min(H_, y0 + anneau), max(0, x0 - anneau):min(W_, x1 + anneau)] = True
+                    m[max(0, y1 - anneau):min(H_, y1 + anneau), max(0, x0 - anneau):min(W_, x1 + anneau)] = True
+                    m[max(0, y0 - anneau):min(H_, y1 + anneau), max(0, x0 - anneau):min(W_, x0 + anneau)] = True
+                    m[max(0, y0 - anneau):min(H_, y1 + anneau), max(0, x1 - anneau):min(W_, x1 + anneau)] = True
+                else:
+                    m[max(0, y0):min(H_, y1), max(0, x0):min(W_, x1)] = True
+            return m & E
+        lignes_txt = [fitz.Rect(mots[i][:4]) for i in range(len(mots))
+                      if _v247_est_ligne(i, L, texte) and not (fitz.Rect(mots[i][:4]) & R).is_empty]
+        ponct = [fitz.Rect(mots[i][:4]) for i in range(len(mots))
+                 if (not _v247_est_ligne(i, L, texte)) and mots[i][4] and mots[i][4][-1] in _V247_PONCT
+                 and not (fitz.Rect(mots[i][:4]) & R).is_empty]
+        T = masque_de(lignes_txt) | masque_de(ponct)
+        D = _v247_dilate(masque_de([d for d in decor if not (d & R).is_empty], anneau=2), 2, E)
+        # l'intérieur n'est jamais effacé : une fenêtre qui contient W n'est pas un intrus ;
+        # une fenêtre contenue dans une fenêtre-tableau non plus (elle lui appartient)
+        # un tableau qui tient la moitié de W n'est pas non plus un intrus pour W : ce que W porte lui appartient
+        autres = [g['clip'] for j, g in enumerate(fenetres) if j != k and not g['clip'].contains(W)
+                  and not (f.get('tableau') and W.contains(g['clip']))
+                  and not (g.get('tableau') and (W & g['clip']).get_area() >= 0.5 * W.get_area())]
+        O = masque_de(autres)
+        F0 = E & ~(T | D | O)
+        lab0 = _v247_etiqueter(_v247_dilate(F0, 1, _np247.ones_like(E, dtype=bool)))
+        cases_isolees = []
+        for c in cases:
+            q = c & R
+            if q.is_empty or c.contains(W) or _v247_en_bande(c, cases):
+                continue
+            x0, y0, x1, y1 = px(c)
+            labs = _np247.unique(lab0[max(0, y0 - 2):min(H_, y1 + 2), max(0, x0 - 2):min(W_, x1 + 2)])
+            labs = labs[labs > 0]
+            if not len(labs):
+                continue
+            dehors = 0
+            for lb in labs:
+                ys, xs = _np247.where(lab0 == lb)
+                if xs.min() < x0 - 4 or ys.min() < y0 - 4 or xs.max() > x1 + 4 or ys.max() > y1 + 4:
+                    dehors += 1
+            if dehors == 0:
+                cases_isolees.append(c)
+        C = _v247_dilate(masque_de(cases_isolees), 2, E)
+        I = T | C | D | O
+        F = E & ~I
+        lab = _v247_etiqueter(_v247_dilate(F, 1, _np247.ones_like(E, dtype=bool)))
+        wx0, wy0, wx1, wy1 = px(W)
+        labs = _np247.unique(lab[wy0:wy1, wx0:wx1])
+        labs = labs[labs > 0]
+        corps = _np247.isin(lab, labs) & F if len(labs) else _np247.zeros_like(F)
+        G = masque_de([boites[i] for i in glyphes if not (boites[i] & R).is_empty], dil=1)
+        dessin = corps & ~G
+        etats.append(dict(R=R, E=E, F=F, I=I, corps=corps, dessin=dessin, a_dessin=bool(dessin.any()), lab=lab, labs=labs, px=px))
+    # 3. les mots à 6 mm ou moins : la fenêtre la plus proche, une seule
+    for i in glyphes:
+        if i in attribution:
+            continue
+        b = boites[i]
+        meilleur = None
+        portee = int(_np247.ceil(_V247_DIST_MM / _V247_MM * K)) + 1   # 6 mm en pixels : seule l'encre à cette portée compte
+        for k, st in enumerate(etats):
+            R = st['R']
+            if (b & R).is_empty or not st['a_dessin']:
+                continue
+            x0, y0, x1, y1 = st['px'](b)
+            des = st['dessin']
+            sy0, sy1 = max(0, y0 - portee), min(des.shape[0], y1 + portee)
+            sx0, sx1 = max(0, x0 - portee), min(des.shape[1], x1 + portee)
+            tranche = des[sy0:sy1, sx0:sx1]
+            if not tranche.any():
+                continue
+            ys, xs = _np247.where(tranche)
+            ys = ys + sy0
+            xs = xs + sx0
+            dx = _np247.maximum(0, _np247.maximum(x0 - xs, xs - (x1 - 1)))
+            dy = _np247.maximum(0, _np247.maximum(y0 - ys, ys - (y1 - 1)))
+            d = float(_np247.sqrt(dx * dx + dy * dy).min()) / K * _V247_MM
+            if d <= _V247_DIST_MM and (meilleur is None or d < meilleur[0]):
+                meilleur = (d, k)
+        if meilleur is not None:
+            attribution[i] = meilleur[1]
+    # 4. les morceaux
+    resultats = []
+    for k, f in enumerate(fenetres):
+        st = etats[k]
+        R, F, I, corps, lab, labs = st['R'], st['F'], st['I'], st['corps'], st['lab'], st['labs']
+        px = st['px']
+        elements = []
+        for lb in labs:
+            m = (lab == lb) & F
+            nn = int(m.sum())
+            if nn < _V247_BRUIT:
+                continue
+            ys, xs = _np247.where(m)
+            elements.append((m, (int(xs.min()), int(ys.min()), int(xs.max() + 1), int(ys.max() + 1))))
+        rects = []
+        for m, bb in elements:
+            for r in _v247_coupe(bb, m, I):
+                s = _v247_serrer(r, m)
+                if s:
+                    rects.append(s)
+        rects = _v247_absorber(rects)
+        mots_k = [i for i, kk in attribution.items() if kk == k]
+        for i in mots_k:
+            b = boites[i] & R
+            if b.is_empty:
+                continue
+            x0, y0, x1, y1 = px(boites[i])
+            g = st['E'][y0:y1, x0:x1]
+            if not g.any():
+                continue
+            ys, xs = _np247.where(g)
+            rects.append((int(x0 + xs.min()), int(y0 + ys.min()), int(x0 + xs.max() + 1), int(y0 + ys.max() + 1)))
+        rects = _v247_absorber(rects)
+        K = _V247_K
+        pieces = [fitz.Rect(R.x0 + x0 / K, R.y0 + y0 / K, R.x0 + x1 / K, R.y0 + y1 / K) for (x0, y0, x1, y1) in rects]
+        pieces.sort(key=lambda r: (round(r.y0), r.x0))
+        entier = None
+        if pieces:
+            entier = fitz.Rect(min(p.x0 for p in pieces), min(p.y0 for p in pieces),
+                               max(p.x1 for p in pieces), max(p.y1 for p in pieces))
+        resultats.append(dict(pieces=pieces, mots=mots_k, entier=entier, sans_dessin=not bool(corps.any())))
+    return resultats, len(attribution)
+
+
+def _v247_absorber_rects(rects):
+    """Un rectangle (pt) contenu dans un autre de la même figure disparaît."""
+    rects = sorted(rects, key=lambda r: -(r.width * r.height))
+    gardes = []
+    for r in rects:
+        if any(q.contains(r) for q in gardes):
+            continue
+        gardes.append(r)
+    return gardes
+
+
+def _v247_ancres(figs):
+    """v2.36 touchée : une ancre par FIGURE, posée sur son premier morceau, au cadre entier."""
+    return [dict(f, cadre=(f.get("entier_cadre") or f["cadre"])) for f in figs if f.get("morceau", 1) == 1]
+
+
 def parse_pdf(content: bytes, filename: str):
     """
     Extrait d'un PDF, dans l'ordre de lecture :
@@ -1676,6 +2186,9 @@ def parse_pdf(content: bytes, filename: str):
     corrige = pages_de_corrige(doc)   # V2.20 — figures ET texte de ces pages restent dehors
     _s245_ajouts = {}        # v2.45 — index ajouté -> grille d'origine (S1)
     _s245_grilles_pos = []   # v2.45 — grilles des pages de contenu (S2)
+    _v247_compte = {"figures": 0, "morceaux": 0, "mots_attaches": 0, "tableaux": 0, "tableaux_ajoutes": 0,
+                    "tableaux_non_cherches": 0, "fenetres_sans_dessin": 0, "traits_absorbes": 0,
+                    "morceaux_trop_petits": 0, "pages_en_repli": 0, "derniere_erreur": ""}   # v2.47
 
     for pno, page in enumerate(doc):
         if (pno + 1) in corrige:      # V2.20 — page de corrigé : rien n'en part
@@ -1813,11 +2326,15 @@ def parse_pdf(content: bytes, filename: str):
             dans_tableau = any(not (r & z).is_empty
                                and (r & z).get_area() >= 0.6 * r.get_area()
                                for z in zones_grilles)
+            # v2.47 — V2.10 GARDÉE, RESTREINTE (DEC-1913, § 152) : un tableau qui porte
+            # un chiffre ou une étiquette est une figure (« un tableau, une grille, une
+            # rangée de bandeaux est une figure ») ; un tableau qui ne porte que des
+            # lignes de texte reste du texte (« ce qui est du texte n'est jamais emporté »).
             if dans_tableau and not any(
                     not (r & ra).is_empty
                     and (r & ra).get_area() >= 0.5 * min(r.get_area(),
                                                          ra.get_area())
-                    for ra in rasters):
+                    for ra in rasters) and not _v247_porte_un_glyphe(page, r):
                 continue
             keep.append(r)
 
@@ -1991,6 +2508,7 @@ def parse_pdf(content: bytes, filename: str):
         #
         # Matrix(2,2) sur 72 ppp = 144 ppp. Rasterisation 2x de chaque zone.
         page_words = page.get_text("words")
+        _v247_fenetres = []   # v2.47 — les fenêtres retenues de la page, découpées après les portes
         for r in keep:
             try:
                 # Lignes fines : dilater le clip pour que le trait soit
@@ -2072,43 +2590,163 @@ def parse_pdf(content: bytes, filename: str):
                 if not _ne_grille and not _v234_porte_un_dessin(page, clip, rasters):
                     n_c11 += 1
                     continue
-                pix = page.get_pixmap(clip=clip, matrix=fitz.Matrix(2, 2))
-                if pix.width < 8 or pix.height < 8:
-                    continue
-                _png30 = pix.tobytes("png")
-                _v238_extra, _v238_voie = _v238_champs(doc, page, clip, _mots_clip)
-                b64 = base64.b64encode(_png30).decode()
-                images.append({
-                    # v2.30 — chaque figure porte son cadre en PLEINES décimales
-                    # et le sceau de son contenu (sha-256 du PNG, 12 hex).
-                    # Condition : la figure est retenue. Effet : dire QUOI est
-                    # découpé, pas seulement combien. (voir JOURNAL BACKEND v2.30)
-                    "cadre": [clip.x0, clip.y0, clip.x1, clip.y1],
-                    "sceau": _hl.sha256(_png30).hexdigest()[:12],
-                    # V2.21 — une figure qui porte des mots se SIGNALE, elle ne se
-                    # supprime jamais : une scène concrète (bulle, étiquette de
-                    # wagon) vaut plus que la règle (arbitrage du 10.08, K.5).
-                    **({"mots_taches": _mots_clip} if _mots_clip >= 6 else {}),
-                    **({"decor_probable": True} if _decor_ else {}),
-                    "index": idx,
-                    "page": pno + 1,
-                    "data": f"data:image/png;base64,{b64}",
-                    "w": pix.width, "h": pix.height,
-                    # Taille PHYSIQUE de la zone rasterisée dans le document
-                    # source (points PDF → mm : 1 pt = 25.4/72 mm). Permet au
-                    # frontend d'imprimer la figure à taille réelle
-                    # (class="img-echelle") pour la mesure à la règle.
-                    "w_mm": round(clip.width * 25.4 / 72, 1),
-                    "h_mm": round(clip.height * 25.4 / 72, 1),
-                    # v2.38 — LA DIVERGENCE : voir l'en-tête de `_v238_champs`.
-                    # `data` ci-dessus part au MODÈLE et n'est pas touché ;
-                    # ces champs-ci ne servent qu'à LA FEUILLE DE L'ÉLÈVE.
-                    **_v238_extra,
-                })
-                _v238_compte[_v238_voie] = _v238_compte.get(_v238_voie, 0) + 1
-                idx += 1
+                # v2.47 — la fenêtre a passé les portes : elle est découpée après (voir _v247_*)
+                _v247_fenetres.append({"clip": fitz.Rect(clip), "mots_clip": _mots_clip,
+                                       "decor": bool(_decor_), "tableau": bool(_ne_grille),
+                                       "thin": bool(is_thin)})
             except Exception:
                 pass
+
+        # ══ v2.47 — LA DÉCOUPE EN MORCEAUX (DEC-1909 à 1916 ; bloc _v247_* ci-dessus) ══
+        # Condition : la page a des fenêtres retenues. Effet : chaque fenêtre devient
+        # une FIGURE faite de MORCEAUX, chacun une image de la liste avec sa place et
+        # sa marque ; les tableaux de la page deviennent des figures ; les mots à 6 mm
+        # partent avec leur figure. En cas d'accroc, la page retombe sur la découpe
+        # 2.46 (une image par fenêtre), comptée `pages_en_repli` — rien n'est perdu.
+        _v247_appendus_page = 0
+        try:
+            _v247_mots, _v247_L, _v247_texte = _v247_lignes(page)
+            _v247_cases, _v247_decor = _v247_cases_et_decor(page)
+            _v247_tabs, _v247_nc = _v247_tableaux(page, _v247_cases)
+            _v247_compte["tableaux_non_cherches"] += _v247_nc
+            _v247_tabs = _v247_fusionner_tableaux(_v247_tabs)   # les cellules d'un quadrillage sont un seul tableau
+            _v247_compte["tableaux"] += len(_v247_tabs)
+            for _t in _v247_tabs:
+                _t = _t & page.rect
+                if _t.width < 8 or _t.height < 8 or (_t.width * _t.height) > 0.85 * page_area:
+                    continue
+                # un tableau qui ne porte ni image ni chiffre ni étiquette est du texte : pas une figure
+                if not (any(not (_t & _ra).is_empty for _ra in rasters) or _v247_porte_un_glyphe(page, _t)):
+                    _v247_compte["tableaux_de_texte"] = _v247_compte.get("tableaux_de_texte", 0) + 1
+                    continue
+                _couv = [g for g in _v247_fenetres
+                         if (not (_t & g["clip"]).is_empty) and (_t & g["clip"]).get_area() >= 0.6 * _t.get_area()]
+                if _couv:
+                    for g in _couv:
+                        g["tableau"] = True
+                else:
+                    _v247_fenetres.append({"clip": _t, "mots_clip": 0, "decor": False,
+                                           "tableau": True, "thin": False})
+                    _v247_compte["tableaux_ajoutes"] += 1
+            _v247_res, _v247_n_mots = _v247_decouper_page(
+                page, _v247_fenetres, _v247_tabs, _v247_mots, _v247_L, _v247_texte,
+                _v247_cases, _v247_decor)
+            _v247_compte["mots_attaches"] += _v247_n_mots
+            # ce qui est à l'intérieur d'un tableau lui appartient : chaque morceau d'une fenêtre
+            # ordinaire dont le centre est dans une fenêtre-tableau devient un morceau du tableau
+            _v247_tabs_idx = [_j for _j, _t in enumerate(_v247_fenetres) if _t["tableau"]]
+            _v247_pieces_par_fig = {}
+            _v247_verses = set()
+            for _k, g in enumerate(_v247_fenetres):
+                for _p in _v247_res[_k]["pieces"]:
+                    _cible = _k
+                    if not g["tableau"]:
+                        _c = fitz.Point((_p.x0 + _p.x1) / 2, (_p.y0 + _p.y1) / 2)
+                        for _j in _v247_tabs_idx:
+                            if _v247_fenetres[_j]["clip"].contains(_c):
+                                _cible = _j
+                                _v247_verses.add(_k)
+                                break
+                    _v247_pieces_par_fig.setdefault(_cible, []).append(_p)
+            _v247_parent = {_k: 0 for _k in _v247_verses if not _v247_pieces_par_fig.get(_k)}
+            _v247_compte["fenetres_versees_au_tableau"] = _v247_compte.get("fenetres_versees_au_tableau", 0) + len(_v247_parent)
+            _v247_couverts = set()
+            for _k, g in enumerate(_v247_fenetres):
+                if not g["thin"] or _k in _v247_parent:
+                    continue
+                for _j, g2 in enumerate(_v247_fenetres):
+                    if _j == _k or g2["thin"] or _j in _v247_parent:
+                        continue
+                    if any(((p & g["clip"]).get_area() >= 0.8 * g["clip"].get_area())
+                           for p in _v247_pieces_par_fig.get(_j, []) if not (p & g["clip"]).is_empty):
+                        _v247_couverts.add(_k)
+                        break
+            _v247_compte["traits_absorbes"] += len(_v247_couverts)
+            for _k, g in enumerate(_v247_fenetres):
+                if _k in _v247_parent or _k in _v247_couverts:
+                    continue
+                _pieces = _v247_absorber_rects([p & page.rect for p in _v247_pieces_par_fig.get(_k, [])
+                                                if not (p & page.rect).is_empty])
+                if not _pieces:
+                    _v247_compte["fenetres_sans_dessin"] += 1
+                    continue
+                _pieces.sort(key=lambda r: (round(r.y0), r.x0))
+                _fig_id = "p%d-f%d" % (pno + 1, _k)
+                _entier = fitz.Rect(min(p.x0 for p in _pieces), min(p.y0 for p in _pieces),
+                                    max(p.x1 for p in _pieces), max(p.y1 for p in _pieces))
+                _entrees = []
+                for _p in _pieces:
+                    _p = _v247_au_moins(_p, 4.0, page.rect)   # un trait, un point : 8 px au moins
+                    pix = page.get_pixmap(clip=_p, matrix=fitz.Matrix(2, 2))
+                    if pix.width < 8 or pix.height < 8:
+                        _v247_compte["morceaux_trop_petits"] += 1
+                        continue
+                    _png30 = pix.tobytes("png")
+                    _mots_p = len(re.findall(r"[A-Za-zàâçéèêëîïôöûüù]{2,}", page.get_text(clip=_p) or ""))
+                    _v238_extra, _v238_voie = _v238_champs(doc, page, _p, _mots_p)
+                    _entree = {
+                        "cadre": [_p.x0, _p.y0, _p.x1, _p.y1],
+                        "sceau": _hl.sha256(_png30).hexdigest()[:12],
+                        **({"mots_taches": g["mots_clip"]} if g["mots_clip"] >= 6 else {}),
+                        **({"decor_probable": True} if g["decor"] else {}),
+                        **({"tableau": True} if g["tableau"] else {}),
+                        "index": idx,
+                        "page": pno + 1,
+                        "data": "data:image/png;base64," + base64.b64encode(_png30).decode(),
+                        "w": pix.width, "h": pix.height,
+                        "w_mm": round(_p.width * 25.4 / 72, 1),
+                        "h_mm": round(_p.height * 25.4 / 72, 1),
+                        "figure": _fig_id,
+                        "morceau": len(_entrees) + 1,
+                        "n_morceaux": 0,
+                        **_v238_extra,
+                    }
+                    images.append(_entree)
+                    _entrees.append(_entree)
+                    _v238_compte[_v238_voie] = _v238_compte.get(_v238_voie, 0) + 1
+                    idx += 1
+                if not _entrees:
+                    _v247_compte["fenetres_sans_dessin"] += 1
+                    continue
+                for _e in _entrees:
+                    _e["n_morceaux"] = len(_entrees)
+                if len(_entrees) > 1:
+                    _pe = page.get_pixmap(clip=_entier & page.rect, matrix=fitz.Matrix(2, 2))
+                    _entrees[0]["entier"] = "data:image/png;base64," + base64.b64encode(_pe.tobytes("png")).decode()
+                    _entrees[0]["entier_cadre"] = [_entier.x0, _entier.y0, _entier.x1, _entier.y1]
+                _v247_compte["figures"] += 1
+                _v247_compte["morceaux"] += len(_entrees)
+                _v247_appendus_page += len(_entrees)
+        except Exception as _e247:
+            _v247_compte["pages_en_repli"] += 1
+            _v247_compte["derniere_erreur"] = (str(_e247) or type(_e247).__name__)[:160]
+            for g in _v247_fenetres:
+                if g["tableau"] and g.get("mots_clip") == 0 and _v247_appendus_page == 0 and False:
+                    continue
+                try:
+                    clip = g["clip"]
+                    pix = page.get_pixmap(clip=clip, matrix=fitz.Matrix(2, 2))
+                    if pix.width < 8 or pix.height < 8:
+                        continue
+                    _png30 = pix.tobytes("png")
+                    _v238_extra, _v238_voie = _v238_champs(doc, page, clip, g["mots_clip"])
+                    images.append({
+                        "cadre": [clip.x0, clip.y0, clip.x1, clip.y1],
+                        "sceau": _hl.sha256(_png30).hexdigest()[:12],
+                        **({"mots_taches": g["mots_clip"]} if g["mots_clip"] >= 6 else {}),
+                        **({"decor_probable": True} if g["decor"] else {}),
+                        "index": idx, "page": pno + 1,
+                        "data": "data:image/png;base64," + base64.b64encode(_png30).decode(),
+                        "w": pix.width, "h": pix.height,
+                        "w_mm": round(clip.width * 25.4 / 72, 1),
+                        "h_mm": round(clip.height * 25.4 / 72, 1),
+                        "figure": "p%d-repli%d" % (pno + 1, idx), "morceau": 1, "n_morceaux": 1,
+                        **_v238_extra,
+                    })
+                    _v238_compte[_v238_voie] = _v238_compte.get(_v238_voie, 0) + 1
+                    idx += 1
+                except Exception:
+                    pass
 
         for g in grilles_page:
             grilles_inventaire.append({
@@ -2153,7 +2791,7 @@ def parse_pdf(content: bytes, filename: str):
         # v2.36 — R1 : les figures de CETTE page reçoivent leur marqueur de
         # position dans le texte, à l'endroit où l'œil les rencontre.
         texte_page, _n_pose, _n_hors = poser_ancres(
-            texte_page, blocs_page, images[i0_page:],
+            texte_page, blocs_page, _v247_ancres(images[i0_page:]),   # v2.47 — une ancre par figure
             getattr(_grilles, "cle_lecture", None) if _grilles else None)
         n_ancres += _n_pose
         n_ancres_hors += _n_hors
@@ -2445,6 +3083,7 @@ def parse_pdf(content: bytes, filename: str):
         "num_exercises": 0,
         "num_images": len(images),
         "images": images,
+        "decoupe": _v247_compte,   # v2.47 — le recompte des morceaux, rendu
         "text": "\n".join(full_text),
         "exercises": [],
         # V2.10 — inventaire des grilles rencontrées, pour le journal et pour
