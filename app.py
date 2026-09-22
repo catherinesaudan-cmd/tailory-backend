@@ -18,6 +18,16 @@ Endpoints:
   POST /convert  → PDF → DOCX (existant, conservé)
   GET  /health   → vérification
 
+V2.50 (22.09.2026, § 160, DEC-1958) : le seuil du pâle passe de 30 à 25 — sa décision, sur la table de
+  mesure_seuil_pale_249.py (le dé de Julie entier à 99 % à ≤ 25, 89 % à 30 ; à 25 rien d'autre ne bouge). Rien d'autre.
+
+V2.49 (22.09.2026, § 159, DEC-1953 et 1954 — après le tirage de la 2.48, COMPTE_TIRAGE_2_48_22-09.md) :
+  · l'anneau effacé autour d'un décor pointillé suit le CONTOUR du décor (ses segments et courbes), plus la boîte qui
+    l'entoure : les coins arrondis du cadre de sa leçon des solides restaient sur la feuille ;
+  · un mot écrit plusieurs fois au même endroit (faux gras) est UN mot : « faces » ×4 faisait une « ligne » de quatre
+    mots, donc un intrus effacé, et les légendes du cube disparaissaient.
+  Le seuil du pâle (le dé de Julie) est remesuré d'abord, la valeur est à elle (DEC-1951). Page compagne : la 10.424.
+
 V2.48 (21.09.2026, § 156, DEC-1936 à 1939 — après le tirage mauvais de la 2.47, COMPTE_TIRAGE_2_47_21-09.md
        et COMPTE_FIGURE_ENTIERE_ET_MORCEAUX_POSES_21-09.md) :
   · une case est un rectangle (traits et rectangles seulement) : l'œil du poisson du cp-11 disparaissait à
@@ -346,7 +356,7 @@ PDF_B64_MAX = 4_000_000  # ~3 Mo de PDF, une trentaine de pages illustrées
 #   0 grille déclarée : rang suivant, non ouvert).
 #   (voir JOURNAL BACKEND v2.46)
 # ═══════════════════════════════════════════════════════════════════════════
-VERSION = "2.48"
+VERSION = "2.50"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # v2.34 — C11 : UN CADRE SANS DESSIN N'EST PAS UNE FIGURE
@@ -1683,10 +1693,12 @@ def _v238_champs(doc, page, clip, mots_clip):
 # ══════════════════════════════════════════════════════════════════════════════
 import numpy as _np247
 from PIL import Image as _Im247, ImageFilter as _If247
+from PIL import ImageDraw as _Id249   # v2.49 : le tracé des contours de décor (DEC-1953)
 
 _V247_K = 2.0                       # 144 ppp, comme la photographie du modèle
 _V247_MM = 25.4 / 72.0
-_V247_ECART = 30                    # encre = écart au blanc ≥ 30 (le pâle compte)
+# v2.50 — son seuil (DEC-1958) : 25 — à 25 le dé de Julie revient entier (99 %) et rien d'autre ne bouge ; à 20 huit lignes de texte se font avaler ; à 30 le dé reste amputé
+_V247_ECART = 25                    # encre = écart au blanc ≥ 25 (le pâle compte ; son seuil, DEC-1958)
 _V247_BRUIT = 9                     # px² : poussières écartées
 _V247_MARGE = 20.0 / _V247_MM       # pt : la région autour d'une fenêtre (flèches, mots à 6 mm)
 _V247_DIST_MM = 6.0                 # les lettres et les chiffres à 6 mm ou moins
@@ -1698,6 +1710,20 @@ def _v247_lignes(page):
     """Les mots de la page, et pour chacun la taille de sa ligne et le texte de sa ligne
     (même hauteur à 50 %, écart ≤ 1,5 × hauteur)."""
     mots = [w for w in page.get_text('words') if w[4].strip()]
+    # v2.49 — un mot écrit plusieurs fois au même endroit (faux gras) est UN mot, pas quatre : un seul exemplaire par texte quand les boîtes se recouvrent à 80 % (un faux gras décale de 0,3 pt) avant de former les lignes (DEC-1954)
+    _uniques = []
+    for w in mots:
+        _b = fitz.Rect(w[:4]); _double = False
+        for u in _uniques:
+            if u[4] != w[4]:
+                continue
+            _q = fitz.Rect(u[:4]) & _b
+            if not _q.is_empty and _q.get_area() >= 0.8 * min(_b.get_area(), fitz.Rect(u[:4]).get_area()):
+                _double = True
+                break
+        if not _double:
+            _uniques.append(w)
+    mots = _uniques
     par = list(range(len(mots)))
 
     def tr(a):
@@ -1746,7 +1772,8 @@ def _v247_cases_et_decor(page):
             continue
         tirets = bool(d.get('dashes')) and str(d.get('dashes')).strip() not in ('', '[] 0')
         if tirets:
-            decor.append(fitz.Rect(r))
+            # v2.49 — le décor garde son chemin (segments, rectangles, courbes) : l'anneau effacé suivra le contour, pas la boîte (DEC-1953)
+            decor.append((fitz.Rect(r), list(d.get('items') or [])))
             continue
         if r.width * r.height > 40000:
             continue
@@ -1983,6 +2010,30 @@ def _v247_dilate(m, r, E):
     return (_np247.array(_Im247.fromarray((m * 255).astype(_np247.uint8)).filter(_If247.MaxFilter(2 * r + 1))) > 0) & E
 
 
+def _v249_masque_contour(chemins, R, K, H_, W_, E):
+    """v2.49 (DEC-1953) : le masque des contours de décor — chaque segment, côté de rectangle ou courbe tracé à ± 2 px, en pixels de la région R à l'échelle K ; & E."""
+    im = _Im247.new('L', (W_, H_), 0); dr = _Id249.Draw(im)
+    def P(p): return ((p.x - R.x0) * K, (p.y - R.y0) * K)
+    def bez(p0, p1, p2, p3, n=16):
+        pts = []
+        for k in range(n + 1):
+            t = k / n; u = 1 - t
+            pts.append((u*u*u*p0[0] + 3*u*u*t*p1[0] + 3*u*t*t*p2[0] + t*t*t*p3[0], u*u*u*p0[1] + 3*u*u*t*p1[1] + 3*u*t*t*p2[1] + t*t*t*p3[1]))
+        return pts
+    for items in chemins:
+        for it in items:
+            try:
+                if it[0] == 'l': dr.line([P(it[1]), P(it[2])], fill=255, width=5)
+                elif it[0] == 're':
+                    q = it[1]; a, b, c, d = P(fitz.Point(q.x0, q.y0)), P(fitz.Point(q.x1, q.y0)), P(fitz.Point(q.x1, q.y1)), P(fitz.Point(q.x0, q.y1)); dr.line([a, b, c, d, a], fill=255, width=5)
+                elif it[0] == 'qu':
+                    q = it[1]; dr.line([P(q.ul), P(q.ur), P(q.lr), P(q.ll), P(q.ul)], fill=255, width=5)
+                elif it[0] == 'c': dr.line(bez(P(it[1]), P(it[2]), P(it[3]), P(it[4])), fill=255, width=5)
+            except Exception:
+                pass
+    return (_np247.array(im) > 0) & E
+
+
 def _v247_decouper_page(page, fenetres, tableaux, mots, L, texte, cases, decor):
     """Les morceaux de chaque fenêtre de la page.
     fenetres : liste de dict {clip: Rect, tableau: bool, ...} ; rend, pour chaque fenêtre,
@@ -2041,7 +2092,8 @@ def _v247_decouper_page(page, fenetres, tableaux, mots, L, texte, cases, decor):
                  if (not _v247_est_ligne(i, L, texte)) and mots[i][4] and mots[i][4][-1] in _V247_PONCT
                  and not (fitz.Rect(mots[i][:4]) & R).is_empty]
         T = masque_de(lignes_txt) | masque_de(ponct)
-        D = _v247_dilate(masque_de([d for d in decor if not (d & R).is_empty], anneau=2), 2, E)
+        # v2.49 — l'anneau du décor suit son contour, pas le rectangle qui l'entoure (DEC-1953) : les coins arrondis d'un cadre pointillé n'échappent plus
+        D = _v247_dilate(_v249_masque_contour([it for (rd, it) in decor if not (rd & R).is_empty], R, K, H_, W_, E), 2, E)
         # l'intérieur n'est jamais effacé : une fenêtre qui contient W n'est pas un intrus ;
         # une fenêtre contenue dans une fenêtre-tableau non plus (elle lui appartient)
         # un tableau qui tient la moitié de W n'est pas non plus un intrus pour W : ce que W porte lui appartient
