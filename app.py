@@ -18,6 +18,10 @@ Endpoints:
   POST /convert  → PDF → DOCX (existant, conservé)
   GET  /health   → vérification
 
+V2.51 (23.09.2026, § 171, DEC-2026 à 2028 — le test d'Opus 5.5, COMPTE_170_TEST_OPUS_5_5_23-09.md) : la gomme (S243) passe de
+  claude-opus-5 à claude-opus-5-5, avec output_config effort « high » (seulement quand le modèle est Opus 5.5 : Opus 5 tournait à son
+  défaut high, Opus 5.5 tourne par défaut à medium). L'extraction ne bouge pas. Le tirage est à elle. Rien d'autre.
+
 V2.50 (22.09.2026, § 160, DEC-1958) : le seuil du pâle passe de 30 à 25 — sa décision, sur la table de
   mesure_seuil_pale_249.py (le dé de Julie entier à 99 % à ≤ 25, 89 % à 30 ; à 25 rien d'autre ne bouge). Rien d'autre.
 
@@ -356,7 +360,7 @@ PDF_B64_MAX = 4_000_000  # ~3 Mo de PDF, une trentaine de pages illustrées
 #   0 grille déclarée : rang suivant, non ouvert).
 #   (voir JOURNAL BACKEND v2.46)
 # ═══════════════════════════════════════════════════════════════════════════
-VERSION = "2.50"
+VERSION = "2.51"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # v2.34 — C11 : UN CADRE SANS DESSIN N'EST PAS UNE FIGURE
@@ -3363,7 +3367,8 @@ async def formats_acceptes():
 # Pourquoi : JOURNAL_BACKEND_v2_43.md (chantier REMEDE-SYMBIOSE — l'arbitrage
 # R3 de Catherine du 23.08.2026, panel PANEL_REMEDE_SYMBIOSE.md porte 7/7).
 # ═══════════════════════════════════════════════════════════════════════════
-_S243_MODELE = "claude-opus-5"
+# v2.51 — le test d'Opus 5.5 (DEC-2026) : la gomme juge avec le modèle des tirages, Opus 5.5 désormais.
+_S243_MODELE = "claude-opus-5-5"
 _S243_TUILE_MAX = 110
 _S243_COLLE = 14.0
 _S243_MIN_COTE = 12.0
@@ -3458,8 +3463,11 @@ def _s243_juge_tuile(api_key, png, liste_txt, numeros):
     les tuiles déjà jugées et payées (revue adverse du 24.08)."""
     try:
         client = anthropic.Anthropic(api_key=api_key, timeout=600.0)
+        # v2.51 — l'effort « high » seulement quand le modèle est Opus 5.5 (DEC-2026) : une seule chose change. La réflexion compte
+        # dans max_tokens (8 000) : une réponse coupée est une tuile non jugée, dite et reprise une fois (v2.43) — rien n'est effacé.
         rep = client.messages.create(
             model=_S243_MODELE, max_tokens=8000,
+            **({"output_config": {"effort": "high"}} if _S243_MODELE == "claude-opus-5-5" else {}),
             messages=[{"role": "user", "content": [
                 {"type": "text", "text": _S243_DEMANDE + liste_txt},
                 {"type": "image", "source": {"type": "base64",
