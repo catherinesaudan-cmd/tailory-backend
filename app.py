@@ -1,21 +1,185 @@
 """
 Tailory Backend — Pipeline documentaire pédagogique
+(numéro de version : UNE seule déclaration, la constante VERSION ci-dessous —
+ l'en-tête n'en porte plus ; voir JOURNAL BACKEND v2.23, défaut de livraison
+ « le fichier annonçait 2.18 »)
 FastAPI + python-docx + pdf2docx + Anthropic proxy + pictogrammes ARASAAC
-
-Le numéro de version : UNE seule déclaration, la constante VERSION ci-dessous ; /health la lit.
-L'histoire des versions, le pourquoi et les mesures : JOURNAL BACKEND (un seul journal, une entrée par version).
 
 Endpoints:
   POST /pictos   → résolution de mots-clés en pictogrammes ARASAAC (base64)
+                   (chantier prioritaire validé : supports visuels du mode
+                    Participation — non-lecteur, non-verbal/CAA, allophone)
   POST /parse    → DOCX/PDF/ODT → structure JSON pédagogique
-                   (formats bureautiques : convertis en PDF via LibreOffice puis pipeline PDF)
+                   (ODT : converti en PDF via LibreOffice puis pipeline PDF —
+                    indispensable car les ODT contiennent souvent des formes
+                    vectorielles natives invisibles pour l'extracteur DOCX)
   POST /generate → proxy Anthropic avec retry + chunking
   POST /export   → structure JSON adaptée → DOCX
-  POST /convert  → PDF → DOCX
+  POST /convert  → PDF → DOCX (existant, conservé)
   GET  /health   → vérification
+
+V2.11 (chantier 6.8 — segments courts étiquetés, 31 juillet 2026) :
+  · Un trait fin de 7 à 14 mm devient une figure candidate s'il porte une
+    ÉTIQUETTE DE SÉRIE juste à sa gauche — une lettre ou un chiffre seul
+    suivi d'une parenthèse ou d'un point : a) b) e) 1) 2. — ET qu'un autre
+    trait étiqueté de longueur différente (> 5 %) existe sur la même page.
+    Mesuré sur essai_10117 : le segment e) fait 8,0 mm dans la source,
+    sous le plancher de 14,1 mm (40 pt) qui écarte tirets, puces et
+    soulignements ; dans un exercice de MESURE, un trait court qui porte
+    sa lettre est une vraie figure, pas un parasite.
+  · Ce qui reste dehors, et pourquoi : les tirets et puces (jamais
+    étiquetés) ; les lignes de réponse d'une liste numérotée « 1) ___ »
+    (étiquetées mais TOUTES de la même longueur — les segments d'un
+    exercice de mesure ont des longueurs toutes différentes, c'est le
+    principe de l'exercice) ; un trait court étiqueté isolé sans compagnon
+    (le plancher de 14,1 mm garde le dernier mot) ; l'étiquette au-dessus
+    du trait (trop proche d'un mot souligné ou d'un numérateur — porte
+    fermée pour cette version). Les promus subissent ensuite les mêmes
+    filtres anti-bruit que les longs (isolement, souligné, familles) et le
+    filtre v2.5 des pages de mesure.
+
+V2.10 (grilles et formes composites, 27 juillet 2026) :
+  · Les quadrillages et les tableaux d'une source ne partent plus en miettes.
+    Trois symptômes réparés, tous mesurés sur un cas d'essai fabriqué :
+      - un quadrillage vide disparaissait entièrement (ses traits réguliers
+        étaient éliminés comme du bruit) : le modèle recevait des taches
+        coloriées sans repère pour compter, d'où les aires inventées ;
+      - un tableau ressortait en file de mots, sans plus dire quelle valeur
+        allait avec quelle entrée (« 36 / 24 / 1 2 3 … 12 ») ;
+      - ce même tableau repartait AUSSI en figure découpée : vu deux fois,
+        une fois juste et une fois faux.
+    Le serveur ne résout rien : il mesure et il le dit. Une grille produit sa
+    forme (« quadrillage 8 colonnes x 6 lignes, case 10,0 mm »), son contenu
+    si elle porte du texte, et le nombre de cases pleines de chaque figure —
+    ce dernier UNIQUEMENT si les figures épousent la grille. Une forme
+    oblique, un triangle, un décalage : rien n'est annoncé, et la raison du
+    silence est transmise. Un comptage douteux est plus dangereux qu'absent.
+    Module `grilles.py`, batterie `test_grilles_v210.py` (21 cas, à vide).
+    Si le module est absent au déploiement, le pipeline retombe à l'identique
+    sur le comportement 2.9.3 — aucune panne, seulement l'ancien défaut.
+
+V2.9.3 (expérience du mode dégradé, 26 juillet 2026) :
+  · PDF_B64_MAX : le plafond d'attachement du PDF converti (ODT) passe de
+    150 000 à 4 000 000 caractères base64. Il doublait en silence le plafond
+    du frontend : remonter celui du frontend seul ne changeait rien, le PDF
+    ne quittait jamais le backend. Quand le plafond est dépassé, la réponse
+    porte désormais « pdf_b64_skipped_bytes » — plus de rejet muet.
+
+V2.9.2 (chantier ARASAAC seul — périmètre validé par Catherine) :
+  · POST /pictos : {"mots": ["araignée", …], "lang": "fr"} → pour chaque mot,
+    le meilleur pictogramme ARASAAC en data-URL PNG 300 px, prêt à injecter
+    dans le HTML (l'export reste autonome, aucune dépendance réseau à
+    l'impression). Recherche via bestsearch avec repli search ; normalisation
+    des mots (minuscules, déterminants élidés « l'araignée » → « araignée ») ;
+    langues fr/de/en… (code ARASAAC).
+  · CACHE deux niveaux, zéro dépendance nouvelle (urllib stdlib) :
+    mémoire (mot→id, id→png) + disque (ARASAAC_CACHE_DIR, défaut
+    /tmp/arasaac_cache — les pictos sont immuables). Un mot introuvable est
+    aussi mis en cache (négatif, TTL session) pour ne pas re-frapper l'API.
+  · Limites de sécurité : 24 mots max par requête, timeout 8 s par appel
+    ARASAAC, mots introuvables → null (le frontend applique ses replis
+    émoji/sans-image). Meta d'attribution CC BY-NC-SA incluse dans chaque
+    réponse (obligation de licence — ligne à imprimer en pied de fiche).
+  · /health expose arasaac:"ok"/"unreachable" (sonde légère, 1 requête test
+    mise en cache) pour vérifier l'accès réseau depuis Render au déploiement.
+
+V2.9.1 (retour essai 44 — régression Pacôme corrigée) :
+  · COMPOSITES = SCÈNES SEULEMENT : la garde par paires de la V2.9 laissait
+    fusionner les grands rasters qui se CHEVAUCHENT (scans à marges
+    blanches) — les dessins Pacôme/Momo ont refusionné (161×153 mm) en
+    avalant le fragment « er, hululer… », le bug même de l'essai 39.
+    Un composite exige désormais >= 3 membres tous petits (min-dim
+    <= 120 pt) ; toute paire et tout composant contenant un grand raster
+    sont dissous en rasters individuels (comportement V2.8 restauré pour
+    les scans/photos/cliparts, composites conservés pour les scènes :
+    pièces, billets, tas de tomates, vignettes).
+
+V2.9 (audit essai 43, validé localement sur EvalSerie1maths5P.odt — 168 → 93 figures) :
+  · CLUSTERING RASTER-RASTER : la règle V2.8 « rasters autonomes » pulvérisait
+    les scènes composées de nombreux petits rasters (série 5P : 16 pièces de
+    monnaie, 15 tas de tomates, ~19 billets, 17 vignettes… = 128 rasters) ;
+    le plafond de miniatures du frontend saturait et le modèle déclarait
+    « non disponibles » des images existantes (essai 43 : 154 figures
+    inutilisées, 12 placeholders « coller ici »). Les rasters se regroupent
+    désormais ENTRE EUX (_cluster_rasters, marge 16 pt calibrée sur les
+    écarts mesurés : intra-scène 0-14,6 pt, figures distinctes ≥ 18 pt),
+    jamais avec les vecteurs — l'acquis V2.8 est conservé.
+  · GARDE PHOTOS : deux grands rasters (min-dim > 120 pt ≈ 42 mm) sans
+    recouvrement ne fusionnent jamais — les photos côte à côte restent
+    autonomes (essai 42 insectes : 15/15 photos, à ne pas casser).
+  · SCISSION TABLEAU : un composite multi-rasters est re-scindé à chaque
+    bordure horizontale de tableau qui le traverse sans couper aucun membre
+    (p5 de la 5P : écarts intra/inter-collections indistinguables — seules
+    les bordures séparent les 4 collections, retrouvées une à une : 1, 8,
+    4 et 3 pièces).
+
+V2.8 (retour essai 39, validé localement sur Pacomefantome.odt) :
+  · RASTERS AUTONOMES : une image raster (scan, photo, dessin importé) est
+    déjà une unité sémantique complète — elle n'est PLUS clusterisée, ni avec
+    les autres rasters, ni avec les vecteurs. Cas prouvé (essai 39) : trois
+    dessins scannés aux marges blanches se chevauchant fusionnaient en un
+    bloc de 180×134 mm dont la bbox avalait les lignes basses de la banque
+    de mots — le fragment de texte tronqué « er, hululer… » partait comme
+    figure et était placé tel quel sur la fiche. Seuls les rasters quasi
+    identiques (recouvrement ≥ 80 %) sont dédupliqués. Le clustering ne
+    s'applique désormais qu'aux tracés VECTORIELS (une figure = plusieurs
+    primitives), sa raison d'être.
+
+V2.7 (retours essais 36-37, validé localement sur AireDefinitionetMesure.odt) :
+  · COMPOSANTES CONNEXES : le clustering par union de bounding-box était
+    structurellement vorace — chaque fusion créait une boîte plus grande qui
+    absorbait tout ce qu'elle SURVOLAIT sans en être réellement proche.
+    Cas prouvé (essais 36-37) : le trait séparateur pointillé passait à
+    10,5 pt du tissu E → fusion → la bbox résultante (x45-185 mm)
+    intersectait D, puis C, puis B → composite unique de 169×109 mm,
+    impossible à placer figure par figure côté modèle (placeholders
+    contradictoires, « B et E » alors que C et D y étaient aussi).
+    Désormais : composantes connexes calculées sur les primitives D'ORIGINE
+    (arête si écart < marge), bbox par composante calculée À LA FIN.
+    Résultat validé : les 5 tissus A-E sortent individuellement.
+  · MARGE 14 → 10 pt : l'écart réel entre les tissus B et C est de 12,2 pt ;
+    les sous-éléments d'une même figure (cellules de grille, hachures) se
+    touchent ou restent < 10 pt. Aucune figure légitime connue du corpus
+    n'a d'écart interne de 10-14 pt.
+  · SÉPARATEURS PARTIELS : une RANGÉE de barres fines (h < 16 pt) alignées
+    couvrant ensemble > 50 % de la largeur de page, sans voisin plein,
+    est un trait de section coupé par du texte — exclue avant clustering.
+    Le filtre pleine largeur (0.92·pw) ne voyait pas ces morceaux courts.
+  · BANDES DE TEXTE : une bande plate (h < 32 pt ≈ 11 mm) contenant du texte
+    (≥ 2 mots de ≥ 3 lettres, ou 1 mot couvrant > 30 % de sa largeur) est
+    une cellule d'en-tête de tableau ou un titre décoré, PAS une figure —
+    exclue avant clustering. Validé : « Figures | Calcul de l'aire »,
+    « Exercice N », « L'aire du triangle », « Définition N » — précisément
+    les bandeaux gris qui fuyaient dans les fiches des essais 36-37.
+    Les figures plates légitimes survivent : tissus sans texte (lettres
+    vectorielles), lignes graduées (chiffres seulement).
+
+V2.3 (retours essais 25-29) :
+  · FONDS DE PAGE : les rectangles couvrant > 85 % de la page (LibreOffice
+    exporte un fond blanc pleine page selon le modèle de document) sont exclus
+    AVANT clustering — en v2.2 un tel fond absorbait toutes les régions en un
+    cluster pleine page, jeté ensuite → 0 figure transmise (cas essai 27 :
+    les 15 images d'animaux et les schémas existaient dans la source).
+  · RE-SPLIT : un cluster qui couvre malgré tout > 85 % de la page est
+    re-clusterisé plus finement (marge 5) au lieu d'être jeté ; en dernier
+    recours, ses primitives pleines sont conservées individuellement.
+  · LIGNES FINES : les segments à mesurer et lignes graduées (une dimension
+    quasi nulle, l'autre ≥ 40 pt) sont désormais capturés comme figures —
+    en v2.2 le filtre « dim < 10 » les jetait (cas essai 29 : segments a-f
+    « non disponibles » alors qu'ils existaient). Ils partent avec leur
+    taille physique réelle (w_mm/h_mm du clip rasterisé) pour l'impression
+    à l'échelle (class="img-echelle") — mesure à la règle valide.
+    Anti-bruit, une ligne fine n'est une figure QUE si :
+      - elle est isolée (rien à moins de 3 pt — élimine les bordures de
+        tableaux, qui se croisent aux coins),
+      - elle n'est pas un souligné de texte (texte juste au-dessus couvrant
+        ≥ 60 % de sa longueur),
+      - elle n'appartient pas à une famille de ≥ 3 lignes parallèles de même
+        longueur (lignes d'écriture, grilles) — les segments à mesurer ont
+        des longueurs toutes différentes, c'est le principe de l'exercice.
 """
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 import anthropic
@@ -42,21 +206,63 @@ from docx.oxml import OxmlElement
 # pdf2docx (conversion PDF→DOCX existante)
 from pdf2docx import Converter
 
-# V2.9.3 — plafond d'attachement du PDF converti, en caractères base64 : le même que celui de la page (PDF_B64_MAX).
-# Un plafond plus bas ici filtrerait en amont, sans le dire.
+# V2.9.3 — plafond d'attachement du PDF converti, en caractères base64.
+# Doit rester égal à PDF_B64_MAX du frontend (tailoryv10_62.html) : un plafond
+# plus bas ici filtrerait en amont, invisiblement, quoi que fasse le frontend.
 PDF_B64_MAX = 4_000_000  # ~3 Mo de PDF, une trentaine de pages illustrées
 
-# Seule déclaration du numéro de version du serveur : /health la lit ; elle n'est recopiée nulle part (voir JOURNAL BACKEND v2.23).
-# Ce fichier ne porte que ce qu'il fait ; le pourquoi et les mesures de chaque version sont au JOURNAL BACKEND.
-VERSION = "2.53"
+# Seule déclaration du numéro de version du backend. /health la LIT — jamais
+# recopiée à la main ailleurs (même règle que pour grilles/formes ci-dessous).
+# (voir JOURNAL BACKEND v2.23)
+# ═══════════════════════════════════════════════════════════════════════════
+# v2.38 — 19.08.2026 — LE DÉCOUPLAGE DE LA FEUILLE ET DU MODÈLE
+#
+#   CE QUI CHANGE : chaque figure porte désormais, EN PLUS de `data`, de quoi
+#   fabriquer une image DE FEUILLE — `origine` + `origine_boite` quand l'image
+#   de l'enseignante est utilisable telle quelle, `data_feuille` (la zone à
+#   300 ppp) sinon. `data` n'est pas touché.
+#
+#   LA MESURE QUI L'A JUSTIFIÉ : le 19.08.2026, sur les 17 documents du corpus,
+#   202 figures sur 202 étaient des PHOTOGRAPHIES de rectangles de page à
+#   144 ppp — aucune n'était l'image posée par l'enseignante. Départagé dans les
+#   deux sens : rapport pixels/millimètres constant à 144 ppp sur les 202, et
+#   une figure identique À L'OCTET au rendu de sa zone.
+#
+#   LE PÉRIMÈTRE : 35 figures sur 138 du lot A remplissent les quatre
+#   conditions. Les autres reçoivent la photographie à 300 ppp.
+#
+#   CE QUE ÇA COÛTE, MESURÉ : la feuille passe de 0,26 à 0,35 Mo (×1,32) et le
+#   serveur prend 0,06 s de plus sur 0,52 s (+11 %) — sur UN tirage de 8
+#   figures. Le temps d'ouverture ne bouge pas. Rien de ce qui part au modèle
+#   ne change, donc AUCUN coût de jetons.
+#
+#   ⛔ LA DIVERGENCE EST ÉCRITE À L'ENDROIT QUI DÉCIDE : voir `_v238_champs`.
+#   (voir JOURNAL BACKEND v2.38)
+# ═══════════════════════════════════════════════════════════════════════════
+VERSION = "2.38"
 
-# ═══ v2.34 — C11 : UN CADRE SANS DESSIN N'EST PAS UNE FIGURE ═══
-# Condition : dans le cadre découpé, aucun objet dessiné. Effet : le cadre n'est pas transmis au modèle.
-# Ce que la fonction lit : page.get_drawings() (les tracés), page.get_text("dict") (blocs de texte et d'image), rasters (les images collées,
-# déjà constituées) — deux proportions géométriques, aucune déclaration d'une autre couche. (voir JOURNAL BACKEND v2.34)
+# ═══════════════════════════════════════════════════════════════════════════
+# v2.34 — C11 : UN CADRE SANS DESSIN N'EST PAS UNE FIGURE
+#
+# Condition : dans le cadre découpé, aucun objet dessiné.
+# Effet    : le cadre n'est pas transmis au modèle.
+# Le POURQUOI, les chiffres, le panel et les témoins : JOURNAL BACKEND v2.34.
+#
+# CE QUE CETTE FONCTION LIT, et qui existe bien à l'étape où elle tourne
+# (§ 2.5 du protocole, vérifié dans le code et non de mémoire) :
+#   · page.get_drawings()      — primitives de tracé de la page
+#   · page.get_text("dict")    — blocs de texte et blocs d'image de la page
+#   · rasters                  — images collées, déjà constituées en amont
+# Aucune déclaration d'une autre couche, aucun mot, aucune police, aucun nom
+# de fichier : deux proportions géométriques. Ce n'est PAS une reconnaissance
+# d'apparence au sens du § 2.1 — elle lit les primitives de dessin de la
+# SOURCE, pas ce que le modèle écrit.
+# ═══════════════════════════════════════════════════════════════════════════
 C11_AIRE_MIN_PT2 = 20.0    # sous cette aire, un tracé est un filet, pas un objet
-C11_PART_TEXTE = 0.10      # la part de texte au-delà de laquelle un tracé est le contenant d'un texte (voir JOURNAL BACKEND v2.34)
-C11_PLAFOND_CADRE = 0.60   # un tracé qui couvre plus de 60 % du cadre est le cadre — seulement si le cadre porte du texte
+C11_PART_TEXTE = 0.10      # palier mesuré : 5 %, 10 % et 15 % donnent le même
+                           # résultat sur les 20 témoins — seuil au milieu
+C11_PLAFOND_CADRE = 0.60   # un tracé qui couvre plus de 60 % du cadre EST le
+                           # cadre — MAIS seulement si le cadre porte du texte
 
 
 def _v234_porte_un_dessin(page, clip, rasters):
@@ -87,64 +293,22 @@ def _v234_porte_un_dessin(page, clip, rasters):
             return True
     return False
 
-# ═══ v2.46 — LA FRONTIÈRE : « PORTE UN DESSIN OU UNE COULEUR » ═══
-# Deux lectures, déclarées, qui ne comptent rien :
-#   · PORTE UN DESSIN — au moins une image raster dont le CENTRE est dans le rectangle de la grille ;
-#   · PORTE UNE COULEUR — un remplissage qui n'est ni noir (toutes composantes ≤ 0,03) ni blanc (toutes ≥ 0,97), ET plus large qu'un
-#     trait (1 mm).
-# Ce qu'elle ne fait pas : elle ne lit pas les tracés au trait ; un raster à cheval sur le bord, centre dehors, n'est pas vu.
-# (voir JOURNAL BACKEND v2.46)
-_V246_SEUIL_TRAIT_MM = 1.0   # (2) — plus large qu'un trait : petit côté > 1 mm
-_V246_NOIR = 0.03            # (1) — noir : toutes composantes ≤ 0,03
-_V246_BLANC = 0.97           # (1) — blanc : toutes composantes ≥ 0,97
-
-
-def _v246_porte_dessin_ou_couleur(page, rect):
-    """Vrai si la grille `rect` porte un dessin (une image posée dont le centre est dedans — les images de la page
-    telles quelles, pas les régions regroupées) ou une couleur (remplissage ni noir ni blanc, plus large qu'un trait)."""
-    for img in page.get_images(full=True):
-        for ra in page.get_image_rects(img[0]):
-            if rect.contains(fitz.Point((ra.x0 + ra.x1) / 2, (ra.y0 + ra.y1) / 2)):
-                return True
-    aire = rect.get_area()
-    for d in page.get_drawings():
-        fill = d.get("fill")
-        if not fill:
-            continue
-        r = d.get("rect")
-        if r is None:
-            continue
-        r = fitz.Rect(r)
-        if r.is_empty or r.get_area() >= aire * 1.01:
-            continue                       # le fond de la grille ou de la page
-        if not rect.contains(fitz.Point((r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2)):
-            continue
-        comp = [float(v) for v in fill]
-        if all(v <= _V246_NOIR for v in comp) or all(v >= _V246_BLANC for v in comp):
-            continue                       # (1) noir ou blanc : pas une couleur
-        if min(r.width, r.height) * 25.4 / 72 <= _V246_SEUIL_TRAIT_MM:
-            continue                       # (2) un trait, même coloré, reste un trait
-        return True
-    return False
-
-
-# v2.28 — LE SERVEUR SIGNE SON CONTENU. Condition : le module se charge. Effet : l'empreinte du fichier lui-même est calculée
-# UNE fois et servie par /health. (voir JOURNAL BACKEND v2.28)
+# v2.28 — LE SERVEUR SIGNE SON CONTENU, PAS SEULEMENT SON NOM (11.08.2026).
+# Condition : le module se charge. Effet : l'empreinte du fichier lui-même est
+# calculée UNE fois et servie par /health. Une étiquette n'est pas le code (leçon
+# de la 2.18 puis du tirage 10371 : « même numéro, contenu différent ») ; la
+# signature rend la divergence visible d'un regard. (voir JOURNAL BACKEND v2.28)
 import hashlib as _hl
 try:
     with open(__file__, "rb") as _f:
         EMPREINTE = _hl.sha256(_f.read()).hexdigest()[:12]
 except Exception:
     EMPREINTE = "illisible"
-# ═══ v2.44 — LE SERVEUR DIT S'IL EST TOUJOURS LE MÊME ═══
-# Une valeur fabriquée AU DÉMARRAGE DU PROCESSUS, servie par /health : elle change chaque fois que le processus meurt et repart.
-# Ce n'est pas RENDER_INSTANCE_ID (qui change au remplacement de l'instance) : celui-là est servi en plus, comme information.
-# Limite : avec plusieurs processus, chacun aurait la sienne (aujourd'hui WEB_CONCURRENCY=1). (voir JOURNAL BACKEND v2.44)
-DEMARRAGE = uuid.uuid4().hex[:12]
-INSTANCE_HEBERGEUR = os.environ.get("RENDER_INSTANCE_ID") or "non fourni"
-
-# v2.29 — LE SERVEUR ANNONCE AVEC QUOI IL LIT. Condition : le module se charge. Effet : la version de la bibliothèque
-# d'extraction est lue UNE fois et servie par /health. (voir JOURNAL BACKEND v2.29)
+# v2.29 — LE SERVEUR ANNONCE AUSSI AVEC QUOI IL LIT (11.08.2026). Condition : le
+# module se charge. Effet : la version de la bibliothèque d'extraction est lue
+# UNE fois et servie par /health — deux machines qui comptent différemment se
+# voient d'un regard. Née de l'écart 12/11 du tirage 10371, environnement de
+# Render non lisible autrement. (voir JOURNAL BACKEND v2.29)
 try:
     import pymupdf as _pm
     LECTEUR_PDF = "pymupdf " + getattr(_pm, "__version__", "?")
@@ -200,9 +364,12 @@ import fitz  # PyMuPDF, déjà installé (dépendance pdf2docx)
 
 
 def _connected_components(rects, margin=10.0):
-    """v2.7 — Regroupe les primitives par COMPOSANTES CONNEXES : arête entre deux primitives d'ORIGINE si leur écart
-    < margin ; la bbox de chaque composante est calculée à la fin (et non par union itérative de boîtes, qui absorbait
-    toute primitive survolée). (voir JOURNAL BACKEND v2.7)"""
+    """v2.7 — Regroupe les primitives par COMPOSANTES CONNEXES : arête entre
+    deux primitives d'ORIGINE si leur écart < margin ; la bbox de chaque
+    composante est calculée à la fin. Remplace l'union itérative de bbox,
+    qui absorbait toute primitive SURVOLÉE par une boîte déjà fusionnée
+    sans qu'elle soit réellement proche (cas essais 36-37 : le séparateur
+    collé au tissu E entraînait D, C et B dans un composite unique)."""
     rects = [fitz.Rect(r) for r in rects]
     n = len(rects)
     parent = list(range(n))
@@ -239,13 +406,24 @@ def _connected_components(rects, margin=10.0):
 
 
 def _cluster_rasters(rasters, page, margin=16.0):
-    """v2.9 — Les rasters se regroupent ENTRE EUX, jamais avec les vecteurs. Trois règles :
-    1. composantes connexes, marge 16 pt ;
-    2. SCÈNES SEULEMENT (v2.9.1) : un composite exige ≥ 3 membres TOUS petits (min-dim ≤ 120 pt) ; tout composant
-       contenant un grand raster, ou réduit à une paire, est dissous en rasters individuels ;
-    3. SCISSION TABLEAU : un composite multi-rasters est re-scindé à chaque bordure horizontale de tableau qui le
-       traverse sans toucher aucun de ses membres.
-    (voir JOURNAL BACKEND v2.9)"""
+    """v2.9 — Les rasters se regroupent ENTRE EUX (jamais avec les vecteurs,
+    acquis v2.8 conservé) : les scènes composées de nombreux petits rasters
+    (pièces de monnaie, billets, tas de tomates, vignettes de situations —
+    128 rasters sur la seule série 5P) partaient en figures individuelles,
+    saturaient le plafond de miniatures du frontend et sortaient en
+    « coller ici » (essai 43). Trois règles :
+    1. Composantes connexes, marge 16 pt (écarts intra-scène mesurés : 0-14,6 pt ;
+       figures distinctes du corpus : >= 18 pt).
+    2. SCÈNES SEULEMENT (v2.9.1, retour essai 44) : un composite exige
+       >= 3 membres TOUS petits (min-dim <= 120 pt ~ 42 mm). Tout composant
+       contenant un grand raster (scan, photo, clipart) ou réduit à une paire
+       est dissous en rasters individuels : les scans à marges blanches qui se
+       chevauchent (Pacôme/Momo, essai 39 et 44) et les photos côte à côte
+       (essai 42 insectes) ne fusionnent jamais.
+    3. SCISSION TABLEAU : un composite multi-rasters est re-scindé à chaque
+       bordure horizontale de tableau qui le traverse sans toucher aucun de
+       ses membres (collections en lignes de tableau, p5 : écarts
+       intra/inter-collections indistinguables géométriquement)."""
     n = len(rasters)
     if n <= 1:
         return list(rasters)
@@ -277,9 +455,18 @@ def _cluster_rasters(rasters, page, margin=16.0):
     for i in range(n):
         comps.setdefault(find(i), []).append(rasters[i])
 
-    # v2.9.1 — filtre au niveau du composant : un composite n'est légitime que pour une SCÈNE (au moins 3 membres, tous
-    # petits : min-dim ≤ 120 pt) ; tout composant contenant un grand raster, ou réduit à une paire, est dissous en rasters
-    # individuels. (voir JOURNAL BACKEND v2.9)
+    # v2.9.1 — FILTRE AU NIVEAU DU COMPOSANT (retour essai 44 : régression sur
+    # Pacôme). La garde v2.9 par paires (« deux grands rasters SANS recouvrement
+    # ne fusionnent pas ») laissait passer les scans à marges blanches qui se
+    # CHEVAUCHENT — exactement le bug de l'essai 39 que la V2.8 avait éliminé :
+    # les dessins de Pacôme et Momo ont refusionné en un composite de
+    # 161×153 mm avalant le fragment « er, hululer… » de la banque de mots.
+    # Nouvelle règle : un composite n'est légitime que pour une SCÈNE —
+    # au moins 3 membres, TOUS petits (min-dim <= 120 pt ~ 42 mm : pièces,
+    # billets, tas, vignettes). Tout composant contenant un grand raster, ou
+    # réduit à une paire, est dissous en rasters individuels (comportement
+    # V2.8). Les scans, photos et cliparts ne fusionnent donc plus jamais,
+    # avec ou sans recouvrement.
     def _scene(members):
         return len(members) >= 3 and all(
             min(m.width, m.height) <= 120 for m in members)
@@ -335,9 +522,11 @@ def _cluster_rasters(rasters, page, margin=16.0):
 
 
 def _drop_separator_rows(solids, pw):
-    """v2.7 — RANGÉE de barres fines (h < 16 pt) alignées couvrant ensemble > 50 % de la largeur de page, sans voisin
-    plein : un trait de section coupé par du texte, que le filtre pleine largeur (0.92) ne voit pas puisque chaque
-    morceau est court."""
+    """v2.7 — RANGÉE de barres fines (h < 16 pt) alignées couvrant ensemble
+    > 50 % de la largeur de page, sans voisin plein = trait de section coupé
+    par du texte (« ---- Exercice 2 ---- »). Le filtre pleine largeur (0.92)
+    ne les voyait pas puisque chaque morceau est court. C'est ce trait qui,
+    passant à 10,5 pt du tissu E, déclenchait la fusion en chaîne."""
     bars = [r for r in solids if r.height < 16]
     others = [r for r in solids if r.height >= 16]
     drop = set()
@@ -363,9 +552,13 @@ def _drop_separator_rows(solids, pw):
 
 
 def _is_text_band(r, words):
-    """v2.7 — bande plate (h < 32 pt) contenant du texte (≥ 2 mots de ≥ 3 lettres, ou 1 seul mot couvrant > 30 % de sa
-    largeur) : une cellule d'en-tête de tableau ou un titre décoré, PAS une figure. Les figures plates sans texte
-    (tissus à lettres vectorielles, lignes graduées à chiffres) passent."""
+    """v2.7 — bande plate (h < 32 pt ≈ 11 mm) contenant du texte : ≥ 2 mots
+    de ≥ 3 lettres, ou 1 seul mot couvrant > 30 % de sa largeur = cellule
+    d'en-tête de tableau ou titre décoré, PAS une figure. Validé sur la
+    source aires : filtre exactement « Figures | Calcul de l'aire »,
+    « Exercice N », « L'aire du triangle », « Définition N » — les bandeaux
+    gris qui fuyaient dans les fiches. Les figures plates légitimes passent :
+    tissus (lettres vectorielles, pas de texte), lignes graduées (chiffres)."""
     if r.height >= 32:
         return False
     n = 0
@@ -382,9 +575,16 @@ def _is_text_band(r, words):
 
 
 def _is_underline_of_text(words, t):
-    """Ligne horizontale = souligné si du texte immédiatement au-dessus couvre ≥ 60 % de sa longueur.
-    v2.4 — la fenêtre tolère les jambages : le bas du mot entre 10 pt au-dessus et 6 pt au-dessous du trait.
-    (voir JOURNAL BACKEND v2.4)"""
+    """Ligne horizontale = souligné si du texte immédiatement au-dessus
+    couvre ≥ 60 % de sa longueur.
+    v2.4 — tolérance élargie : les jambages (descenders) du texte souligné
+    descendent SOUS le trait ; mesuré sur les sources réelles, le bas des mots
+    est 1,7 à 1,9 pt sous le haut du trait, et l'ancienne condition
+    « y1 <= t.y0 + 2 » ne tenait qu'à 0,1 pt près — d'où le soulignement du
+    titre « Remplir un tableau… » transmis comme segment par le serveur
+    (métriques de police différentes). Fenêtre désormais : bas du mot entre
+    10 pt au-dessus et 6 pt au-dessous du trait. Les vrais segments à mesurer
+    ont leur texte le plus proche à ≥ 14 pt : aucun faux positif."""
     if t.height > t.width:
         return False
     cover = 0.0
@@ -403,10 +603,29 @@ def _is_underline_of_text(words, t):
 # inchangé.
 SEUIL_COURT_ETIQUETE = 19.8  # 7,0 mm en points PDF
 
-# V2.12 — DISTANCE LETTRE → TRAIT : l'étiquette peut être jusqu'à 60 pt (21 mm) du départ du trait (une tabulation
-# avec de la marge). Deux conditions referment la porte aux soulignements : RIEN ENTRE LES DEUX (aucun mot ne
-# s'intercale entre l'étiquette et le départ du trait, sur la même bande), et la condition de série du bloc 2c
-# (un autre trait étiqueté de longueur différente sur la page). (voir JOURNAL BACKEND v2.12)
+# V2.12 (chantier 4 — tirage essai_10127) — DISTANCE LETTRE → TRAIT.
+# La V2.11 exigeait l'étiquette à moins de 12 pt (4 mm) du départ du trait.
+# Mesuré le 29.07.2026 sur la page de mesure réellement utilisée (évaluation 3,
+# « Partie 2 Géométrie », six segments a) à f) alignés sur des tabulations) :
+#
+#     d)  85,0 mm   →   7,6 pt      (seul à passer la porte de 12 pt)
+#     f) 114,0 mm   →  16,6 pt
+#     b) 110,0 mm   →  26,1 pt
+#     c)  30,0 mm   →  27,1 pt
+#     e)   8,0 mm   →  45,4 pt      ← le seul qui AVAIT BESOIN de la porte
+#
+# Les quatre longs entraient sans elle (≥ 40 pt). Le court, lui, était rejeté
+# pour 33 pt de tabulation. La porte était calibrée sur une hypothèse, pas sur
+# une mesure. Elle passe à 60 pt (21 mm), ce qui couvre une tabulation avec de
+# la marge.
+#
+# CE QUI REMPLACE LA DISTANCE COMME GARDE-FOU. Élargir seul rouvrirait la porte
+# aux soulignements. Deux conditions la referment :
+#   — RIEN ENTRE LES DEUX (ci-dessous) : aucun mot ne s'intercale entre
+#     l'étiquette et le départ du trait. Un mot souligné a son texte AU-DESSUS
+#     du trait, pas une lettre isolée à sa gauche avec du vide entre les deux ;
+#   — la condition de série du bloc 2c, inchangée : il faut un autre trait
+#     étiqueté de longueur différente sur la page.
 TOL_ETIQUETTE_PT = 60.0
 
 _ETIQUETTE_SERIE = re.compile(r"^([A-Za-z]|\d{1,2})\s*[).]$")
@@ -414,11 +633,14 @@ _LETTRE_SEULE = re.compile(r"^([A-Za-z]|\d{1,2})$")
 
 
 def _etiquette_de_serie(words, t):
-    """V2.11 — vrai si un mot-étiquette de série (lettre ou chiffre seul suivi d'une parenthèse ou d'un point :
-    a) b) e) 1) 2.) se tient JUSTE À GAUCHE du trait : la signature d'un segment d'exercice de mesure ; un tiret,
-    une puce ou un soulignement n'est jamais étiqueté. À gauche seulement : une étiquette au-dessus ressemble
-    trop à un mot souligné ou à un numérateur de fraction."""
-    # V2.12 — une étiquette peut arriver en DEUX mots (« a » puis « ) ») : on recompose avant de juger.
+    """V2.11 (chantier 6.8) — vrai si un mot-étiquette de série (lettre ou
+    chiffre seul suivi d'une parenthèse ou d'un point : a) b) e) 1) 2.) se
+    tient JUSTE À GAUCHE du trait. C'est la signature d'un segment d'exercice
+    de mesure ; un tiret, une puce ou un soulignement n'est jamais étiqueté.
+    À gauche seulement — une étiquette au-dessus ressemble trop à un mot
+    souligné ou à un numérateur de fraction : cette porte reste fermée."""
+    # V2.12 — une étiquette peut arriver en DEUX mots (« a )» écrit « a » puis
+    # « ) », relevé sur la page de mesure réelle). On recompose avant de juger.
     etiquettes = []
     for i, w in enumerate(words):
         txt = w[4].strip()
@@ -432,7 +654,8 @@ def _etiquette_de_serie(words, t):
 
     for w in etiquettes:
         wx0, wy0, wx1, wy1 = w[:4]
-        # à gauche : le mot finit avant le trait (chevauchement de 2 pt toléré), à moins de TOL_ETIQUETTE_PT de son départ
+        # à gauche : le mot finit avant le trait (chevauchement de 2 pt toléré),
+        # à moins de TOL_ETIQUETTE_PT de son départ (V2.12 : 60 pt, mesuré)
         if not (wx1 <= t.x0 + 2 and t.x0 - wx1 <= TOL_ETIQUETTE_PT):
             continue
         # V2.12 — RIEN ENTRE LES DEUX. Ce qui sépare une étiquette de série d'un
@@ -462,24 +685,38 @@ def _etiquette_de_serie(words, t):
     return False
 
 
-# ═══ V2.21 — LES CADRES, LES ZONES VIDES, ET LA FRONTIÈRE DU NATIF ═══
-# Le natif ne remplace que ce que le code sait redessiner sans rien perdre : cases, grilles, bandes de nombres ; tout
-# support figuratif (dessin, photo, carte, schéma) reste image. Rien ici ne touche les rasters. Trois signatures :
-#   · cadre d'exercice = trait sans remplissage, ≤ 10 segments, lignes sur le pourtour et petites courbes DE COIN (chaque
-#     courbe ≤ 15 % du petit côté) ; une ellipse a des courbes en quarts entiers : jamais prise ;
-#   · CADRE ENGLOBANT : un cadre qui contient ≥ 3 autres primitives ou rasters — il ne lie plus et ne part plus en figure ;
-#   · CADRE NU VIDE (rien dedans, ≤ 2 mots) : une ZONE, déclarée (zones_libres), jamais une image.
-# (voir JOURNAL BACKEND v2.21 et v2.22)
+# ═══ V2.21 — LES CADRES, LES ZONES VIDES, ET LA FRONTIÈRE DU NATIF (F1, visage B) ═══
+# RÈGLE ÉCRITE (arbitrage de Catherine, 10.08) : le natif ne remplace que ce que
+# le code sait redessiner sans rien perdre du concret — cases, grilles, bandes
+# de nombres. TOUT SUPPORT FIGURATIF (dessin, photo, carte, schéma) reste image,
+# toujours. Un wagon n'est pas une case. Mesuré : la carte d'hydrographie sort
+# entière (raster autonome, v2.8) ; rien ici ne touche les rasters.
+#
+# Trois signatures, MESURÉES sur pièces (10.08) avant d'être codées :
+#   · cadre d'exercice = trait sans remplissage, ≤ 10 segments, lignes sur le
+#     pourtour et petites courbes DE COIN (chaque courbe ≤ 15 % du petit côté) ;
+#     une ellipse-membrane a des courbes en quarts entiers : jamais prise.
+#   · CADRE ENGLOBANT (la colle des captures trop larges, F6 résolu) : un cadre
+#     qui contient ≥ 3 autres primitives ou rasters — il ne lie plus et ne part
+#     plus en figure. Panel du 10.08 : 11 → 0 figure à texte de tâche, gâteaux
+#     ENTIERS (l'amputation reculait par le même geste), aire intacte 23/23.
+#   · CADRE NU VIDE (rien dedans, ≤ 2 mots) : ce n'est pas une image, c'est une
+#     ZONE — déclarée (zones_libres), le frontend posera la zone native (B7 :
+#     une image ne sert jamais de zone de production ; vu : 177×138 mm de blanc
+#     servi en image sur l'évaluation insectes).
+# (voir JOURNAL BACKEND v2.22)
 def _v21_rect_au_trait(d):
     r = d.get("rect")
     if r is None:
         return False
     f = d.get("fill")
-    # un fond BLANC n'empêche pas d'être un cadre (les cartes sont des rectangles pointillés à fond blanc)
+    # un fond BLANC de carte n'empêche pas d'être un cadre (mesuré : les cartes
+    # « Qui suis-je » sont des rectangles pointillés à fond blanc)
     if f is not None and not all(v >= 0.95 for v in f):
         return False
     items = d.get("items", [])
-    # jusqu'à 24 segments : un rectangle arrondi pointillé se rend en 7-8 lignes + 12 courbes de coin
+    # jusqu'à 24 segments : LibreOffice rend un rectangle arrondi pointillé en
+    # 7-8 lignes + 12 courbes de coin (mesuré sur les quadrilatères, 10.08)
     if not items or len(items) > 24:
         return False
     petit = max(1.0, min(r.width, r.height))
@@ -493,8 +730,11 @@ def _v21_rect_au_trait(d):
         elif t == "c":
             bb = fitz.Rect(min(p.x for p in it[1:]), min(p.y for p in it[1:]),
                            max(p.x for p in it[1:]), max(p.y for p in it[1:]))
-            # V2.24 — le coin se juge AUSSI en absolu : un rayon de coin est un trait d'auteur (~20-23 pt), il ne
-            # grandit pas avec le cadre. (voir JOURNAL BACKEND v2.24)
+            # V2.24 — le coin se juge AUSSI en absolu : un rayon de coin est un
+            # trait d'auteur (~20-23 pt mesurés), il ne grandit pas avec le cadre.
+            # Le seul relatif (15 %) refusait les cadres bas du PDF source exact
+            # (22,8 pt > 20,5) et fabriquait la capture collée du tirage 10366_8.
+            # (voir JOURNAL BACKEND v2.24)
             if max(bb.width, bb.height) > max(0.15 * petit, 25.0):
                 return False
         elif t == "re":
@@ -521,13 +761,19 @@ def _v21_classe_grands_traces(page):
         contenus = sum(1 for j, o in enumerate(rects)
                        if j != i and o is not None and r.contains(o))
         contenus += sum(1 for o in rasters if r.contains(o))
-        # le verrou des tissus : un contour de tissu est PLEIN là où les cadres d'exercice sont POINTILLÉS —
-        # sans tirets, pas d'englobant. (voir JOURNAL BACKEND v2.21)
+        # LE VERROU DES TISSUS (incident attrapé par l'épreuve directe, 10.08) :
+        # un contour de tissu est PLEIN là où tous les cadres d'exercice mesurés
+        # sont POINTILLÉS — sans tirets, pas d'englobant. L'aire garde ses 23.
         tirets = bool(d.get("dashes")) and str(d.get("dashes")).strip() not in ("", "[] 0")
         if r.get_area() >= 8000 and contenus >= 3 and tirets:
             englobants.add(i)
-        # V2.25 — une zone s'annonce en pointillés : un rectangle PLEIN et vide est une forme d'exercice, pas une zone.
-        # (voir JOURNAL BACKEND v2.25)
+        # V2.25 — UNE ZONE S'ANNONCE EN POINTILLÉS (miroir du verrou des tissus).
+        # Un rectangle PLEIN et vide est une FORME d'exercice (un rectangle est
+        # vide par nature) : mesuré le 10.08 soir, la règle sans tirets avalait
+        # le rectangle long de l'évaluation (47×9 mm, absent du tirage 10367),
+        # 8 formes des fiches 7a et les réceptacles du CP (7 fausses zones).
+        # Panel § 2.2 : taille-plancher, voisinage, cadre-parent mesurés et
+        # écartés. (voir JOURNAL BACKEND v2.25)
         elif contenus == 0 and r.get_area() >= 2000 and tirets:
             import re as _re
             mots = len(_re.findall(r"[A-Za-zàâçéèêëîïôöûüù]{2,}",
@@ -612,13 +858,22 @@ def _collect_page_regions(page):
             if r.width * r.height > 0.85 * page_area:
                 continue  # FOND DE PAGE (v2.3) — absorbait tout en v2.2
             if r.width < 10 and r.height < 10:
-                # V2.26 — un micro-tracé ne FONDE jamais une figure, mais il ÉTEND le cadre de celle qu'il touche.
-                # (voir JOURNAL BACKEND v2.26)
+                # V2.26 — un micro-tracé ne FONDE jamais une figure, mais il
+                # ÉTEND le cadre de celle qu'il touche : les cerises (7×7 pt)
+                # étaient ignorées et celle du sommet mourait hors cadre —
+                # l'élève comptait 5 cerises là où l'énoncé en promet 6
+                # (tirage 10368_4, œil de Catherine). Panel § 2.2 : plancher
+                # abaissé (inopérant, mesuré) et marge fixe (arrose tout)
+                # écartés. (voir JOURNAL BACKEND v2.26)
                 micros.append(fitz.Rect(r))
                 continue  # micro-tracé
             if r.width < 10 or r.height < 10:
-                # Ligne fine : candidate d'office si assez longue pour être une figure (segment, ligne graduée), pas un
-                # simple tiret. V2.11 — entre 7 et 14 mm, candidate SOUS CONDITIONS, vérifiées au bloc 2c.
+                # Ligne fine : candidate d'office si assez longue pour être
+                # une figure (segment, ligne graduée), pas un simple tiret.
+                # V2.11 (chantier 6.8) — entre 7 et 14 mm, candidate SOUS
+                # CONDITIONS, vérifiées au bloc 2c : un segment court qui
+                # porte sa lettre dans un exercice de mesure est une vraie
+                # figure (segment e de 8 mm, essai_10117).
                 if max(r.width, r.height) >= 40:
                     thins.append(fitz.Rect(r))
                 elif max(r.width, r.height) >= SEUIL_COURT_ETIQUETE:
@@ -640,12 +895,16 @@ def _collect_page_regions(page):
     solids = [r for r in solids
               if not any(ra.contains(r) for ra in rasters)]
 
-    # 2c. V2.11 — promotion des segments courts étiquetés. Un trait de 7 à 14 mm n'entre qu'à deux conditions cumulées :
+    # 2c. V2.11 (chantier 6.8) — promotion des segments courts étiquetés.
+    # Un trait de 7 à 14 mm n'entre qu'à deux conditions cumulées :
     #   1. une étiquette de série juste à sa gauche (a), e), 1), 2. …) ;
-    #   2. un AUTRE trait étiqueté de longueur différente (> 5 %) sur la page (les segments d'un exercice de mesure ont
-    #      des longueurs toutes différentes ; les lignes de réponse d'une liste numérotée font toutes la même : dehors).
-    # Les promus subissent ensuite les mêmes filtres anti-bruit que les longs (isolement, souligné, familles) puis le
-    # filtre v2.5 des pages de mesure. (voir JOURNAL BACKEND v2.11)
+    #   2. un AUTRE trait étiqueté de longueur différente (> 5 %) sur la
+    #      page — les segments d'un exercice de mesure ont des longueurs
+    #      toutes différentes, c'est le principe de l'exercice ; les lignes
+    #      de réponse d'une liste numérotée font toutes la même : dehors.
+    # Les promus subissent ensuite les mêmes filtres anti-bruit que les
+    # longs (isolement, souligné, familles) puis le filtre v2.5 des pages
+    # de mesure — la porte ne s'ouvre que d'un cran, pas en grand.
     if courts:
         candidats = [t for t in courts
                      if _etiquette_de_serie(words_v27, t)]
@@ -707,11 +966,25 @@ except Exception:
     FORMES_ACTIVES = False
 
 
-# ══ v2.14 — LE GRAS DE LA SOURCE SURVIT À LA LECTURE DU PDF ═══
-# La fonction relit la page span par span et entoure les passages en gras de deux marqueurs — ⟦gras⟧ … ⟦/gras⟧ — que la
-# page sait reconvertir. Le gras : le bit 4 des drapeaux de span (16), ou « Bold » dans le nom de la police.
-# Borne connue : le chemin « grilles » (texte_avec_grilles) construit son texte lui-même et n'est pas couvert.
-# (voir JOURNAL BACKEND v2.14)
+# ══ v2.14 — LE GRAS DE LA SOURCE SURVIT À LA LECTURE DU PDF ═══════════════════════════
+# Chantier ouvert le 30.07.2026. La règle de mise en évidence (frontend v10.151) dit que
+# le gras de la source est reproduit par défaut ; mais quand la source arrive en PDF, le
+# serveur lisait `page.get_text("text")`, qui rend une chaîne PLATE : le gras était perdu
+# avant même que le modèle le voie. Aucune règle de conservation ne pouvait donc être
+# tenue sur ce chemin — la perte était silencieuse, le pire cas de la doctrine.
+#
+# Ce que fait la fonction : elle relit la page span par span et entoure les passages en
+# gras de deux marqueurs — ⟦gras⟧ … ⟦/gras⟧ — que le frontend sait reconvertir en <strong>
+# (filet v10.158 b). Le choix de marqueurs à crochets blancs plutôt que d'étoiles ou de
+# balises est délibéré : ils n'existent dans aucune source scolaire, ne se confondent avec
+# aucune syntaxe, et s'ils survivent par accident jusqu'à la feuille élève le filet du
+# frontend les rattrape et le signale.
+#
+# BORNES CONNUES, écrites ici plutôt qu'oubliées :
+#  - le chemin « grilles » (texte_avec_grilles) construit son texte lui-même et n'est pas
+#    couvert : sur une page à grilles, le gras reste perdu. À traiter en v2.15.
+#  - PyMuPDF signale le gras par le bit 4 des drapeaux de span (valeur 16) ; certaines
+#    polices déclarent le gras dans leur NOM seulement (« …-Bold »), d'où le second test.
 _GRAS_OUV = "\u27e6gras\u27e7"
 _GRAS_FER = "\u27e6/gras\u27e7"
 
@@ -723,20 +996,33 @@ def _span_est_gras(span):
     return ("bold" in nom) or ("black" in nom) or ("heavy" in nom)
 
 
-# ═══ v2.36 — R1 : L'ANCRE DE LECTURE ═══
+# ═══ v2.36 — R1 : L'ANCRE DE LECTURE (chantier C8, reprise 89) ═════════════════
 # CONDITION : une page dont les blocs de texte sont rendus avec leur position.
-# EFFET : chaque figure de la page reçoit, dans le texte transmis au modèle, le marqueur [TAILORY_IMG_N] posé APRÈS le
-# bloc de texte qui la précède dans l'ordre de lecture. Le texte n'est pas reconstruit : les marqueurs y sont INSÉRÉS.
-# (voir JOURNAL BACKEND v2.36)
+# EFFET : chaque figure de la page reçoit, dans le texte transmis au modèle, le
+# marqueur [TAILORY_IMG_N] posé APRÈS le bloc de texte qui la précède dans
+# l'ordre de lecture. Le texte n'est pas reconstruit : les marqueurs y sont
+# INSÉRÉS, et rien d'autre n'y change.
+# (voir JOURNAL BACKEND v2.36 — le défaut mesuré, sa cause, son remède)
 BANDE_ENJAMBEMENT = 8.0
 
 
 def bloc_enjambe(bloc, y_figure, bande=BANDE_ENJAMBEMENT):
     """v2.37 — LA FIGURE EST-ELLE ENJAMBÉE PAR SON BLOC D'ANCRAGE ?
-    Un bloc de TEXTE à plusieurs lignes qui commence au-dessus de la figure et se termine en dessous ne l'annonce
-    plus : cette figure ne reçoit pas de marqueur, elle est comptée à part et déclarée. Trois conditions, toutes
-    nécessaires : le bloc est LU SUR LA PAGE (pas fabriqué par le serveur) ; il porte PLUSIEURS LIGNES ; son bas
-    dépasse le haut de la figure de plus d'une bande de lecture. (voir JOURNAL BACKEND v2.37)
+
+    Un bloc de TEXTE à plusieurs lignes qui commence au-dessus de la figure et
+    se termine en dessous ne l'annonce plus : « avant » et « après » n'ont pas
+    de réponse unique. Arbitrage du 17.08 (voie 3) : cette figure ne reçoit pas
+    de marqueur, elle est comptée à part et déclarée.
+
+    TROIS CONDITIONS, et les trois sont nécessaires — la première version de
+    cette règle n'en portait qu'une et privait d'ancre 36 % des figures :
+      · le bloc est LU SUR LA PAGE, pas FABRIQUÉ par le serveur. Un cadre de
+        quadrillage couvre par nature une grande hauteur : il enjambe presque
+        tout, et son cadre ne dit rien de l'endroit où son texte est écrit.
+        Cadre et ligne ne sont pas la même grandeur.
+      · le bloc porte PLUSIEURS LIGNES. Un bloc d'une ligne ne peut pas
+        enjamber quoi que ce soit.
+      · son bas dépasse le haut de la figure de plus d'une bande de lecture.
     """
     if len(bloc) < 5 or bloc[4] is not False:
         return False                      # fabriqué, ou origine inconnue
@@ -746,46 +1032,6 @@ def bloc_enjambe(bloc, y_figure, bande=BANDE_ENJAMBEMENT):
         return False                      # une seule ligne
     return bloc[3] > y_figure + bande   # v2.37 — une bande de lecture ; au-delà, le bloc
                           # enjambe vraiment la figure et ne l'annonce plus.
-
-
-def _v239_distance_sous(page, figures, _tol=0.5):
-    """Pose `ecart_mm` sur chaque figure qui a quelque chose en dessous d'elle (v2.39). Rend le nombre de figures
-    servies. NE POSE RIEN quand rien n'est trouvé : l'absence du champ est le silence, et la page n'ajoute rien alors.
-    « En dessous » : la première chose sous la figure, quelle qu'elle soit (bloc de texte ou autre figure), avec un
-    recouvrement horizontal exigé — sinon la colonne voisine serait prise pour le dessous.
-    (voir JOURNAL BACKEND v2.39)
-    """
-    if not figures:
-        return 0
-    objets = []
-    try:
-        for b in page.get_text("blocks"):
-            if len(b) >= 5 and str(b[4]).strip():
-                objets.append((b[1], b[0], b[2]))          # (haut, gauche, droite)
-    except Exception:
-        return 0                                            # on s'abstient, on ne devine pas
-    for f in figures:
-        c = f.get("cadre")
-        if c:
-            objets.append((c[1], c[0], c[2]))
-    n = 0
-    for f in figures:
-        c = f.get("cadre")
-        if not c:
-            continue
-        x0, y0, x1, y1 = c[0], c[1], c[2], c[3]
-        haut_du_dessous = None
-        for (oy0, ox0, ox1) in objets:
-            if oy0 < y1 - _tol:                             # pas en dessous
-                continue
-            if min(x1, ox1) - max(x0, ox0) <= 0:            # pas sous elle
-                continue
-            if haut_du_dessous is None or oy0 < haut_du_dessous:
-                haut_du_dessous = oy0
-        if haut_du_dessous is not None:
-            f["ecart_mm"] = round((haut_du_dessous - y1) * 25.4 / 72, 1)
-            n += 1
-    return n
 
 
 def poser_ancres(texte, blocs, figures, cle=None):
@@ -799,8 +1045,12 @@ def poser_ancres(texte, blocs, figures, cle=None):
     if not blocs:
         return texte, 0, len(figures)
 
-    # Fins de bloc dans le texte. Le séparateur du join n'est PAS le même selon la fabrique qui a produit le texte :
-    # on ne suppose rien, on RETROUVE chaque bloc dans le texte, de proche en proche. (voir JOURNAL BACKEND v2.36)
+    # Fins de bloc dans le texte. Le séparateur du join n'est PAS le même selon
+    # la fabrique qui a produit le texte (un saut de ligne ici, rien là, les
+    # blocs portant déjà le leur). Le supposer, c'est se tromper d'un caractère
+    # sur la moitié du corpus — mesuré le 17.08 : 9 documents sur 17 sans
+    # aucune ancre. On ne suppose donc rien : on RETROUVE chaque bloc dans le
+    # texte, de proche en proche.
     fins, curseur = [], 0
     for b in blocs:
         t = b[2]
@@ -811,8 +1061,14 @@ def poser_ancres(texte, blocs, figures, cle=None):
         fins.append(curseur)
 
     # L'ancre : le DERNIER bloc qui PRÉCÈDE la figure DANS L'ORDRE DU TEXTE.
-    # v2.37 — elle emploie LA MÊME CLÉ que l'assemblage (`cle_lecture` du module des grilles, une seule au projet) et
-    # parcourt les blocs DANS L'ORDRE OÙ ILS SONT ASSEMBLÉS. (voir JOURNAL BACKEND v2.37)
+    #
+    # v2.37 (17.08.2026) — elle comparait des altitudes brutes, alors que le
+    # texte, lui, est assemblé par bandes. Mesuré : 9 marqueurs posés entre le
+    # numéro d'un exercice et sa consigne, parce qu'un numéro est écrit un
+    # point plus bas que la consigne qu'il annonce. L'ancre emploie désormais
+    # LA MÊME CLÉ que l'assemblage — `cle_lecture` du module des grilles, une
+    # seule au projet — et parcourt les blocs DANS L'ORDRE OÙ ILS SONT
+    # ASSEMBLÉS. Un ordre pour le texte, le même pour l'ancre.
     if cle is None:
         return texte, 0, len(figures)     # sans la clé du projet : abstention
     poses = []
@@ -822,8 +1078,13 @@ def poser_ancres(texte, blocs, figures, cle=None):
         for i, b in enumerate(blocs):
             if cle(b[0], b[1]) < cf:
                 k = i
-        # v2.37 — une figure ENJAMBÉE par son bloc d'ancrage ne reçoit PAS de marqueur : elle est comptée à part et
-        # déclarée. Seuil : le bas du bloc dépasse le haut de la figure de plus d'une bande de lecture. (voir JOURNAL BACKEND v2.37)
+        # v2.37 — VOIE 3, arbitrage du 17.08 : une figure ENJAMBÉE par son bloc
+        # d'ancrage ne reçoit PAS de marqueur. Le bloc commence au-dessus d'elle
+        # — la règle est respectée — mais il se termine EN DESSOUS : « avant » et
+        # « après » n'ont alors pas de réponse unique, et poser le marqueur
+        # reviendrait à trancher au hasard. Elle est comptée à part et déclarée,
+        # comme une figure sans ancre. Seuil : le bas du bloc dépasse le haut de
+        # la figure de plus d'une bande de lecture. (voir JOURNAL BACKEND v2.37)
         poses.append((k, f["index"]))
 
     # On insère de la fin vers le début pour que les positions restent justes.
@@ -896,123 +1157,127 @@ def _texte_gras(page, rendre_blocs=False):
     return texte
 
 
-# ─── v2.52 — LE JUGEMENT CORRIGÉ : SA RÈGLE, LUE PAR SONNET 5 ───
-# Le modèle recopie les lignes de la page ; le code juge. (voir JOURNAL BACKEND v2.52)
-_V252_MODELE = "claude-sonnet-5"      # le lecteur
-_V252_PPP = 150                        # la définition de la page rendue pour le lecteur
-_V252_MAX_SORTIE = 2000                # la borne de la recopie, en jetons
-_V252_PARALLELE = 4                    # appels en parallèle
-_V252_MOTS_TITRE = 2                   # T1 : le mot seul, au plus 2 mots
-_V252_CONSIGNE = "Recopie chaque ligne de texte visible sur cette image de page, une ligne de texte par ligne, exactement telle qu'elle est écrite (y compris les titres, les cachets, les mots dessinés ou manuscrits et les mots en cursive), dans l'ordre de lecture. Ne commente pas, ne corrige pas, n'ajoute rien, ne résume pas. Si une ligne est illisible, écris [illisible]."   # la consigne du compte 191, à l'octet (batterie_252_juge.py la vérifie)
-_V252_PONCT = "\"'«»“”‘’()[]{}:;,.!?…-–—_*/\\|<>•·"
-
-
-def _v252_sans_accents(s):
-    import unicodedata as _ud
-    return "".join(c for c in _ud.normalize("NFD", s) if _ud.category(c) != "Mn")
-
-
-def _v252_jeton(t):
-    import unicodedata as _ud
-    t = _ud.normalize("NFC", t).strip(_V252_PONCT)
-    return t if any(ch.isalnum() for ch in t) else None
-
-
-def _v252_est_le_mot(t):
-    """Le mot large : « corrigé / corrigés », l'accent et la casse ignorés. Une déclaration : un seul mot, ses deux
-    nombres — pas une liste de formes."""
-    m = _v252_jeton(t)
-    return bool(m) and _v252_sans_accents(m).lower() in ("corrige", "corriges")
-
-
-def _v252_ligne_en_titre(ligne):
-    """T1 : la ligne porte le mot et n'a pas plus de 2 mots (la ponctuation seule ne compte pas)."""
-    jetons = [j for j in (_v252_jeton(t) for t in ligne.split()) if j is not None]
-    return len(jetons) <= _V252_MOTS_TITRE and any(_v252_est_le_mot(t) for t in ligne.split())
-
-
-def _v252_page_est_corrige(lignes):
-    return any(_v252_ligne_en_titre(l) for l in lignes)
-
-
-def _v252_compte_vide():
-    """La marque machine du lecteur : rendue dans la réponse, jamais silencieuse, jamais sur le papier (la page ne lit pas ce champ)."""
-    return {"lecteur": _V252_MODELE, "ppp": _V252_PPP, "pages": 0, "pages_lues": 0, "pages_corrige": [], "pages_en_panne": [],
-            "pages_coupees": [], "sans_cle": False, "jetons_entree": 0, "jetons_sortie": 0, "derniere_erreur": ""}
-
-
-def _v252_lire_page(api_key, png):
-    """UNE page recopiée par le lecteur. Rend (lignes | None, faute | None, coupée, jetons_in, jetons_out).
-    La reprise est celle de la bibliothèque (ses essais, ses attentes), comme pour la gomme et la fiche ; une panne
-    est rendue, jamais levée (v2.53)."""
-    try:
-        client = anthropic.Anthropic(api_key=api_key, timeout=120.0)
-        rep = client.messages.create(
-            model=_V252_MODELE, max_tokens=_V252_MAX_SORTIE,
-            messages=[{"role": "user", "content": [
-                {"type": "image", "source": {"type": "base64", "media_type": "image/png",
-                                             "data": base64.b64encode(png).decode()}},
-                {"type": "text", "text": _V252_CONSIGNE}]}])
-    except Exception as e:
-        return None, "panne d'appel : %s" % type(e).__name__, False, 0, 0
-    texte = "".join(b.text for b in rep.content if getattr(b, "type", "") == "text")
-    lignes = [l.strip() for l in texte.split("\n") if l.strip()]
-    u = rep.usage
-    return (lignes, None, rep.stop_reason == "max_tokens",
-            getattr(u, "input_tokens", 0) or 0, getattr(u, "output_tokens", 0) or 0)
-    return None, faute, False, 0, 0
-
-
-def _v252_pages_de_corrige(doc, api_key, compte):
-    """L'ensemble (1-indexé) des pages jugées corrigé par sa règle sur la recopie de chaque page.
-    Sans clé : aucune lecture, aucune page jugée, et c'est dit. Une page en panne reste dans la fiche, et c'est dit.
-    Le rendu des pages se fait avant les appels (le document ne se partage pas entre fils) ; les appels, à 4 en parallèle."""
-    compte["pages"] = len(doc)
-    if not api_key:
-        compte["sans_cle"] = True
-        return set()
-    pngs = []
-    for pno, page in enumerate(doc):
-        try:
-            pngs.append((pno + 1, page.get_pixmap(matrix=fitz.Matrix(_V252_PPP / 72.0, _V252_PPP / 72.0),
-                                                  alpha=False).tobytes("png")))
-        except Exception as e:
-            compte["pages_en_panne"].append([pno + 1, "rendu impossible : %s" % type(e).__name__])
-    from concurrent.futures import ThreadPoolExecutor as _TPE252
+# ═══ V2.20 — LA PORTE DES CORRIGÉS (chantier F1, visage A) ═════════════════════
+# Les banques de ressources livrent l'évaluation ET son corrigé dans le même
+# document. Jusqu'ici, TOUT partait au modèle : figures en double, texte des
+# réponses — la règle de prompt v10.258 était la seule défense, et le tirage
+# 10366_5 l'a démentie (4 figures du corrigé servies). Le test v10.258 écrivait
+# lui-même le remède attendu : « un filet déterministe... côté serveur ».
+#
+# Le critère est celui déjà arbitré (v10.258 : deux endroits portant les MÊMES
+# items, l'un vide et l'autre rempli), rendu déterministe par DEUX preuves
+# positives, mesurées au panel du 10.08 sur 5 sources (3/3 pages trouvées,
+# 0 fausse alerte — vérité écrite d'avance) :
+#   (1) JUMEAU STRUCTUREL : deux pages se couvrent à ≥ 70 % avec des volumes
+#       comparables, et l'une a PERDU ses pointillés de réponse — c'est elle
+#       le corrigé (« l'un vide, l'autre rempli », mot pour mot) ;
+#   (2) FIGURES JUMELLES : une même image embarquée reparaît sur une page
+#       ultérieure — la page tardive est le corrigé (convention des banques).
+# SANS preuve positive, RIEN n'est écarté : le doute ne détruit jamais une
+# évaluation (K.5). L'exemple résolu n'a pas de jumeau vide : il passe.
+# L'écart est DÉCLARÉ (champ corrige_pages) — une erreur signalée est
+# tolérable, une silencieuse disqualifie. (voir JOURNAL BACKEND v2.20)
+_RX_MOT = None
+def _corrige_tokens(t):
+    import re as _re
+    return [w for w in _re.findall(r"[a-zàâçéèêëîïôöûüù]{3,}|\d+", t.lower())]
+def _corrige_pointilles(t):
+    import re as _re
+    return len(_re.findall(r"[.…_]{4,}", t))
+def pages_de_corrige(doc):
+    """Renvoie l'ensemble (1-indexé) des pages reconnues comme corrigé."""
+    txt = [p.get_text() for p in doc]
+    toks = [_corrige_tokens(t) for t in txt]
     flag = set()
-    with _TPE252(max_workers=_V252_PARALLELE) as ex:
-        lectures = list(ex.map(lambda t: _v252_lire_page(api_key, t[1]), pngs))
-    for (pno, _png), (lignes, faute, coupee, j_in, j_out) in zip(pngs, lectures):
-        compte["jetons_entree"] += j_in
-        compte["jetons_sortie"] += j_out
-        if lignes is None:
-            compte["pages_en_panne"].append([pno, faute])
-            compte["derniere_erreur"] = faute or ""
-            continue
-        compte["pages_lues"] += 1
-        if coupee:
-            compte["pages_coupees"].append(pno)
-        if _v252_page_est_corrige(lignes):
-            flag.add(pno)
-    compte["pages_corrige"] = sorted(flag)
+    # (1) jumeau structurel + pointillés perdus
+    for j in range(len(toks)):
+        for k in range(j + 1, len(toks)):
+            sj, sk = set(toks[j]), set(toks[k])
+            if not sj or not sk:
+                continue
+            couv = max(len(sj & sk) / len(sj), len(sj & sk) / len(sk))
+            ratio = len(toks[k]) / max(1, len(toks[j]))
+            if couv >= 0.70 and 0.5 <= ratio <= 2.0:
+                pj, pk = _corrige_pointilles(txt[j]), _corrige_pointilles(txt[k])
+                if pj == pk:
+                    continue          # pas de « vide contre rempli » : on ne touche pas (K.5)
+                flag.add((k + 1) if pk < pj else (j + 1))
+    # (2) figures jumelles : même image embarquée sur deux pages — MAIS une
+    # ressource décorative (trame, bandeau) se réutilise aussi entre pages.
+    # La preuve n'est donc complète que si les DEUX pages sont AUSSI jumelles
+    # par leur texte (couverture >= 0.70) : c'est le critère v10.258 entier,
+    # mêmes items des deux côtés. Attrapé par la batterie AVANT livraison :
+    # sans ce verrou, une texture partagée faisait écarter une page saine
+    # (aire p.3, numération p.4). (voir JOURNAL BACKEND v2.20)
+    vues = {}
+    for pno, page in enumerate(doc):
+        for info in page.get_images(full=True):
+            vues.setdefault(info[0], set()).add(pno + 1)
+    def _jumelles_texte(j, k):
+        sj, sk = set(toks[j - 1]), set(toks[k - 1])
+        if not sj or not sk:
+            return False
+        return max(len(sj & sk) / len(sj), len(sj & sk) / len(sk)) >= 0.70
+    for pages in vues.values():
+        if len(pages) > 1:
+            k = max(pages)
+            if any(_jumelles_texte(j, k) for j in pages if j < k):
+                flag.add(k)
     return flag
 
 
-# ═══ v2.38 — LE DÉCOUPLAGE : LA FEUILLE ET LE MODÈLE NE REÇOIVENT PLUS LA MÊME IMAGE ═══
-# CONDITION — une figure reçoit l'IMAGE D'ORIGINE si, et seulement si :
+# ═══════════════════════════════════════════════════════════════════════════
+# v2.38 — LE DÉCOUPLAGE : LA FEUILLE ET LE MODÈLE NE REÇOIVENT PLUS LA MÊME
+#         IMAGE. Arbitrage de Catherine du 19.08.2026, réponse S1.
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# ⛔ ICI L'OUTIL SE MET À FAIRE DEUX CHOSES DIFFÉRENTES SELON LA FIGURE, ET
+#    C'EST ÉCRIT POUR QU'ON NE L'OUBLIE PAS.
+#
+#    « C'est exactement la divergence qui a causé C8 au départ — la route Word
+#      posait des repères, la route PDF n'en posait pas, et personne ne s'en
+#      souvenait. » (Catherine, 19.08.2026)
+#
+# CONDITION — une figure reçoit l'IMAGE D'ORIGINE de l'enseignante si, et
+#   seulement si, les quatre conditions suivantes sont vraies :
 #     1. son rectangle contient EXACTEMENT UNE pose d'image (à 90 % d'aire) ;
-#     2. cette image est plus fine que la photographie : au moins 144 ppp à la taille où elle est posée ;
+#     2. cette image est plus fine que la photographie : au moins 144 ppp à la
+#        taille où elle est posée ;
 #     3. elle occupe au moins 90 % du rectangle ;
 #     4. aucun MOT (au moins une lettre) ne tombe dans le rectangle.
 #   Sinon, elle reçoit la MÊME ZONE RENDUE À 300 PPP.
-# EFFET — deux champs neufs, jamais une entrée de plus ni de moins dans la liste des figures : `origine` + `origine_boite`
-#   (la page compose l'image d'origine DANS un cadre de la taille du rectangle) pour les figures qui remplissent les quatre
-#   conditions ; `data_feuille` pour toutes les autres. `data` N'EST JAMAIS TOUCHÉ : c'est ce que le modèle reçoit.
-#   `origine_boite` donne la place de l'image DANS le rectangle, en fractions ; on enrichit chaque entrée À SA PLACE.
-# (voir JOURNAL BACKEND v2.38)
+#
+# EFFET — deux champs neufs, jamais une entrée de plus ni de moins dans la
+#   liste des figures :
+#     `origine` + `origine_boite`  pour les figures qui remplissent les quatre
+#                                  conditions (la page compose l'image d'origine
+#                                  DANS un cadre de la taille du rectangle) ;
+#     `data_feuille`               pour toutes les autres.
+#   ⚠ `data` N'EST JAMAIS TOUCHÉ : c'est ce que le modèle reçoit, et il doit
+#     rester identique à l'octet. Contrôlé par `controle_data_modele.py` contre
+#     la référence gravée le 19.08.2026 (202 figures, 17 documents).
+#
+# POURQUOI — mesuré le 19.08.2026 : 202 figures sur 202 sont des PHOTOGRAPHIES
+#   de rectangles de la page à 144 ppp ; aucune n'est l'image de l'enseignante.
+#   La photographie reste nécessaire AU MODÈLE (journal frontend v10.70,
+#   27.07.2026 : « les figures extraites servent AUSSI de miniatures envoyées au
+#   modèle »), mais elle est floue sur la feuille et elle emporte des morceaux
+#   de page — un pointillé, un filet de bordure — vus par Catherine sur planche.
+#   Le journal du 27.07 portait déjà la piste, jamais reprise : « monter la
+#   définition d'extraction reste souhaitable le jour où les miniatures envoyées
+#   au modèle seront DÉCOUPLÉES des images posées sur la fiche ».
+#   (voir JOURNAL BACKEND v2.38 · JOURNAL FRONTEND v10.70 du 27.07.2026)
+#
+# LES DEUX CONTRAINTES MESURÉES QUE CE CODE DOIT TENIR :
+#   · LA TAILLE EST PORTÉE — `origine_boite` donne la place de l'image DANS le
+#     rectangle, en fractions. Sans elle, la mise en page bougeait de +26 % à
+#     +35 % (mesuré sur quatre figures) ;
+#   · LE RANG NE BOUGE PAS — la page pose les images par leur numéro d'ordre
+#     dans la liste (`tailoryv10_377.html` l. 4627). On enrichit chaque entrée
+#     À SA PLACE ; on n'en ajoute, ne retire ni ne réordonne aucune.
 
-_V238_PPP_PHOTO = 144.0      # la définition de la photographie
-_V238_PPP_FEUILLE = 300.0    # la définition du rendu de feuille
+_V238_PPP_PHOTO = 144.0      # la définition de la photographie, mesurée
+_V238_PPP_FEUILLE = 300.0    # la définition du rendu de feuille (R5)
 _V238_PART_MINI = 0.90       # l'image doit occuper 90 % du rectangle
 _V238_CONTENU = 0.90         # une pose est « dans » le rectangle à 90 % de son aire
 
@@ -1140,650 +1405,7 @@ def _v238_champs(doc, page, clip, mots_clip):
         return ({}, "aucun")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# v2.47 — LA DÉCOUPE EN MORCEAUX. Ce que ce bloc fait, et rien d'autre :
-#   · on coupe sans plancher : un rectangle ne prend jamais autre chose que sa figure ; sinon plusieurs rectangles qui
-#     épousent le bord de la figure ;
-#   · les morceaux partent avec leur position (`cadre`) et leur marque (`figure`, `morceau`, `n_morceaux`) ; la page les
-#     remet à leur place ;
-#   · l'intérieur d'une figure n'est jamais effacé (une fenêtre qui en contient une autre n'est pas « une autre figure ») ;
-#   · les lettres et les chiffres à 6 mm ou moins du dessin partent avec la figure, à leur place ; un mot part avec une
-#     seule figure ; jamais pris : une ligne de texte, un mot portant une ponctuation de fin (. ? ! : ; …) ;
-#   · un tableau, une grille, une rangée de bandeaux est une figure : ce qui est dedans lui appartient ;
-#   · le dessin, c'est la flèche qui touche la figure, la bande de cases couchée ou debout, et le pâle (tout pixel qui
-#     s'écarte du blanc) ;
-#   · pour toute figure de plus d'un morceau, `entier` (le PNG du rectangle qui contient tous ses morceaux).
-# L'étiquetage est un union-find par segments (sans scipy) ; la distance d'un mot au dessin est exacte (boîte → pixel
-# d'encre le plus proche). (voir JOURNAL BACKEND v2.47)
-# ══════════════════════════════════════════════════════════════════════════════
-import numpy as _np247
-from PIL import Image as _Im247, ImageFilter as _If247
-from PIL import ImageDraw as _Id249   # v2.49 : le tracé des contours de décor
-
-_V247_K = 2.0                       # 144 ppp, comme la photographie du modèle
-_V247_MM = 25.4 / 72.0
-# v2.50 — l'écart au blanc qui fait l'encre : 25 (voir JOURNAL BACKEND v2.50)
-_V247_ECART = 25                    # encre = écart au blanc ≥ 25 (le pâle compte)
-_V247_BRUIT = 9                     # px² : poussières écartées
-_V247_MARGE = 20.0 / _V247_MM       # pt : la région autour d'une fenêtre (flèches, mots à 6 mm)
-_V247_DIST_MM = 6.0                 # les lettres et les chiffres à 6 mm ou moins
-_V247_PONCT = '.?!:;…'
-_V247_MOT = re.compile(r'[A-Za-zÀ-ÿ]{3,}')
-
-
-def _v247_lignes(page):
-    """Les mots de la page, et pour chacun la taille de sa ligne et le texte de sa ligne
-    (même hauteur à 50 %, écart ≤ 1,5 × hauteur)."""
-    mots = [w for w in page.get_text('words') if w[4].strip()]
-    # v2.49 — un mot écrit plusieurs fois au même endroit (faux gras) est UN mot : un seul exemplaire par texte quand les boîtes se recouvrent à 80 %, avant de former les lignes
-    _uniques = []
-    for w in mots:
-        _b = fitz.Rect(w[:4]); _double = False
-        for u in _uniques:
-            if u[4] != w[4]:
-                continue
-            _q = fitz.Rect(u[:4]) & _b
-            if not _q.is_empty and _q.get_area() >= 0.8 * min(_b.get_area(), fitz.Rect(u[:4]).get_area()):
-                _double = True
-                break
-        if not _double:
-            _uniques.append(w)
-    mots = _uniques
-    par = list(range(len(mots)))
-
-    def tr(a):
-        while par[a] != a:
-            par[a] = par[par[a]]
-            a = par[a]
-        return a
-    for i in range(len(mots)):
-        xi0, yi0, xi1, yi1 = mots[i][:4]
-        hi = yi1 - yi0
-        for j in range(i + 1, len(mots)):
-            xj0, yj0, xj1, yj1 = mots[j][:4]
-            hj = yj1 - yj0
-            if (min(yi1, yj1) - max(yi0, yj0) >= 0.5 * min(hi, hj)
-                    and max(xj0 - xi1, xi0 - xj1) <= 1.5 * max(hi, hj)):
-                par[tr(i)] = tr(j)
-    grp = {}
-    for i in range(len(mots)):
-        grp.setdefault(tr(i), []).append(i)
-    L, texte = {}, {}
-    for g, idx in grp.items():
-        t = ' '.join(mots[j][4] for j in sorted(idx, key=lambda j: mots[j][0]))
-        for i in idx:
-            L[i] = len(idx)
-            texte[i] = t
-    return mots, L, texte
-
-
-def _v247_est_ligne(i, L, texte):
-    return L[i] >= 3 and bool(_V247_MOT.search(texte[i]))
-
-
-def _v247_est_glyphe(i, mots, L, texte):
-    """Un mot court, sans ponctuation de fin : candidat à partir avec une figure."""
-    t = mots[i][4]
-    if _v247_est_ligne(i, L, texte):
-        return False
-    return not (t and t[-1] in _V247_PONCT)
-
-
-def _v247_cases_et_decor(page):
-    cases, decor = [], []
-    for d in page.get_drawings():
-        r = d.get('rect')
-        if r is None or r.width < 8 or r.height < 8:
-            continue
-        tirets = bool(d.get('dashes')) and str(d.get('dashes')).strip() not in ('', '[] 0')
-        if tirets:
-            # v2.49 — le décor garde son chemin (segments, rectangles, courbes) : l'anneau effacé suivra le contour, pas la boîte
-            decor.append((fitz.Rect(r), list(d.get('items') or [])))
-            continue
-        if r.width * r.height > 40000:
-            continue
-        t = (page.get_text(clip=r) or '').strip()
-        if (not t) or _v21_est_receptacle(t):
-            # v2.48 — une case où l'élève écrit est un rectangle : traits et rectangles seulement ; un œil est rond, ce n'est pas une case
-            rectangle = all(it[0] in ('l', 're') for it in d.get('items', []))
-            if rectangle and d.get('fill') in (None, (1.0, 1.0, 1.0)):
-                cases.append(fitz.Rect(r))
-    return cases, decor
-
-
-def _v247_en_bande(c, cases):
-    """La bande de cases, couchée ou debout : une case n'est un intrus que seule sur sa ligne."""
-    petit = min(c.width, c.height)
-    for c2 in cases:
-        if c2 is c:
-            continue
-        if (abs(c2.height - c.height) <= 0.15 * c.height
-                and min(c.y1, c2.y1) - max(c.y0, c2.y0) >= 0.5 * min(c.height, c2.height)
-                and max(c2.x0 - c.x1, c.x0 - c2.x1) <= 1.5 * petit):
-            return True
-        if (abs(c2.width - c.width) <= 0.15 * c.width
-                and min(c.x1, c2.x1) - max(c.x0, c2.x0) >= 0.5 * min(c.width, c2.width)
-                and max(c2.y0 - c.y1, c.y0 - c2.y1) <= 1.5 * petit):
-            return True
-    return False
-
-
-def _v247_tableaux(page, cases):
-    """Un tableau, une grille, une rangée de bandeaux : (a) find_tables s'il existe ;
-    (b) les grilles de traits fins (bordures Word : rectangles remplis d'épaisseur nulle) ;
-    (c) les rangées de cellules fermées. Rend (liste de Rect, tableaux_non_cherches)."""
-    tabs, non_cherches = [], 0
-    if hasattr(page, 'find_tables'):
-        try:
-            tabs += [fitz.Rect(t.bbox) for t in page.find_tables().tables]
-        except Exception:
-            non_cherches = 1
-    else:
-        non_cherches = 1
-    tf = []
-    for d in page.get_drawings():
-        r = d.get('rect')
-        if r is None:
-            continue
-        if r.height < 1.0 and r.width >= 8:
-            tf.append(('h', round(r.x0, 0), round(r.x1, 0), (r.y0 + r.y1) / 2))
-        elif r.width < 1.0 and r.height >= 8:
-            tf.append(('v', (r.x0 + r.x1) / 2, r.y0, r.y1))
-    grp = {}
-    for t in tf:
-        if t[0] == 'h':
-            grp.setdefault((t[1], t[2]), []).append(t[3])
-    for (x0, x1), ys in grp.items():
-        if len(ys) < 3:
-            continue
-        y0, y1 = min(ys), max(ys)
-        nv = sum(1 for t in tf if t[0] == 'v' and x0 - 2 <= t[1] <= x1 + 2
-                 and t[2] >= y0 - 2 and t[3] <= y1 + 2)
-        if nv >= 2:
-            tabs.append(fitz.Rect(x0, y0, x1, y1))
-    vus = set()
-    for i, c in enumerate(cases):
-        if i in vus:
-            continue
-        grp2 = [i]
-        for j, c2 in enumerate(cases):
-            if j == i or j in vus:
-                continue
-            if ((abs(c2.height - c.height) <= 0.15 * c.height
-                 and min(c.y1, c2.y1) - max(c.y0, c2.y0) >= 0.5 * min(c.height, c2.height))
-                    or (abs(c2.width - c.width) <= 0.15 * c.width
-                        and min(c.x1, c2.x1) - max(c.x0, c2.x0) >= 0.5 * min(c.width, c2.width))):
-                grp2.append(j)
-        if len(grp2) >= 3:
-            vus.update(grp2)
-            tabs.append(fitz.Rect(min(cases[j].x0 for j in grp2), min(cases[j].y0 for j in grp2),
-                                  max(cases[j].x1 for j in grp2), max(cases[j].y1 for j in grp2)))
-    # un tableau contenu dans un autre n'est pas un second tableau
-    tabs = [t for t in tabs if not any(o is not t and o.contains(t) and o != t for o in tabs)]
-    return tabs, non_cherches
-
-
-def _v247_porte_un_glyphe(page, r):
-    """Vrai si le rectangle porte un mot court sans ponctuation (un chiffre, une étiquette) :
-    un tableau qui en porte est une figure ; un tableau qui ne porte que des lignes de texte est du texte."""
-    try:
-        mots, L, texte = _v247_lignes(page)
-    except Exception:
-        return False
-    for i, w in enumerate(mots):
-        if not _v247_est_glyphe(i, mots, L, texte):
-            continue
-        b = fitz.Rect(w[:4])
-        if r.contains(fitz.Point((b.x0 + b.x1) / 2, (b.y0 + b.y1) / 2)):
-            return True
-    return False
-
-
-def _v247_fusionner_tableaux(tabs):
-    """Deux tableaux qui se recouvrent sont un seul tableau (les cellules d'un quadrillage, les rangées et les colonnes d'une même grille)."""
-    tabs = [fitz.Rect(t) for t in tabs]
-    change = True
-    while change:
-        change = False
-        out = []
-        for t in tabs:
-            for i, o in enumerate(out):
-                if not (o & t).is_empty:
-                    out[i] = o | t
-                    change = True
-                    break
-            else:
-                out.append(t)
-        tabs = out
-    return tabs
-
-
-def _v247_au_moins(r, mini, cadre_page):
-    """Un morceau se rend à 8 px au moins (4 pt) dans chaque sens : la porte des 8 px de la 2.46 ne jette plus un trait ou un point."""
-    r = fitz.Rect(r)
-    if r.width < mini:
-        c = (r.x0 + r.x1) / 2
-        r.x0, r.x1 = c - mini / 2, c + mini / 2
-    if r.height < mini:
-        c = (r.y0 + r.y1) / 2
-        r.y0, r.y1 = c - mini / 2, c + mini / 2
-    return r & cadre_page
-
-
-def _v247_etiqueter(mask, huit=True):
-    """Composantes d'un masque : union-find par segments (numpy). 8-connexes par défaut (la découpe, 2.47) ;
-    huit=False : 4-connexes (E1, v2.52 — celles de scipy.ndimage.label)."""
-    h, w = mask.shape
-    lab = _np247.zeros((h, w), dtype=_np247.int32)
-    par = [0]
-    nxt = 1
-    prev = []
-    for y in range(h):
-        row = mask[y]
-        if not row.any():
-            prev = []
-            continue
-        d = _np247.diff(_np247.concatenate(([0], row.astype(_np247.int8), [0])))
-        starts = _np247.where(d == 1)[0]
-        ends = _np247.where(d == -1)[0]
-        cur = []
-        for s, e in zip(starts, ends):
-            lbl = 0
-            for (ps, pe, pl) in prev:
-                if (ps <= e and pe >= s) if huit else (ps < e and pe > s):
-                    if lbl == 0:
-                        lbl = pl
-                    else:
-                        a, b = lbl, pl
-                        while par[a] != a:
-                            a = par[a]
-                        while par[b] != b:
-                            b = par[b]
-                        if a != b:
-                            par[max(a, b)] = min(a, b)
-            if lbl == 0:
-                lbl = nxt
-                par.append(nxt)
-                nxt += 1
-            lab[y, s:e] = lbl
-            cur.append((s, e, lbl))
-        prev = cur
-    racine = _np247.arange(nxt)
-    for i in range(1, nxt):
-        a = i
-        while par[a] != a:
-            a = par[a]
-        racine[i] = a
-    return racine[lab]
-
-
-# ─── v2.52 — E1 : L'ENCRE DES IMAGES EN LIGNE. Sur une page qui porte au moins une image en ligne : l'encre de TOUS ses
-# blocs image, sur un bitmap à 144 ppp, réunie à 1 mm (dilatation en croix), composantes 4-connexes ≥ 4 mm de côté
-# (l'étiquetage de la 2.47). (voir JOURNAL BACKEND v2.52) ───
-_V252_PPP_ENCRE = 144
-_V252_REUNION_MM = 1.0
-_V252_PLANCHER_MM = 4.0
-
-
-def _v252_dilate_croix(B, iterations):
-    for _ in range(iterations):
-        D = B.copy()
-        D[1:, :] |= B[:-1, :]
-        D[:-1, :] |= B[1:, :]
-        D[:, 1:] |= B[:, :-1]
-        D[:, :-1] |= B[:, 1:]
-        B = D
-    return B
-
-
-def _v252_encre_du_bloc(bl):
-    """La carte d'encre d'un bloc image (True = pixel non blanc), ou None si l'image ne se décode pas."""
-    try:
-        pm = fitz.Pixmap(bl["image"])
-        if pm.n - pm.alpha >= 3:
-            pm = fitz.Pixmap(fitz.csGRAY, pm)
-        a = _np247.frombuffer(pm.samples, dtype=_np247.uint8).reshape(pm.height, pm.width, pm.n)[:, :, 0]
-        return a < 200
-    except Exception:
-        return None
-
-
-def _v252_fenetres_encre(page):
-    """Les fenêtres d'encre (fitz.Rect, pt) d'une page qui porte au moins une image en ligne ; sinon rien."""
-    try:
-        infos = page.get_image_info(xrefs=True)
-    except Exception:
-        return []
-    if not any(not it.get("xref") for it in infos):
-        return []
-    K = _V252_PPP_ENCRE / 72.0
-    W, H = int(page.rect.width * K) + 1, int(page.rect.height * K) + 1
-    B = _np247.zeros((H, W), dtype=bool)
-    for bl in page.get_text("dict")["blocks"]:
-        if bl.get("type") != 1:
-            continue
-        r = fitz.Rect(bl["bbox"])
-        x0, y0 = int(r.x0 * K), int(r.y0 * K)
-        x1, y1 = max(int(r.x1 * K) + 1, x0 + 1), max(int(r.y1 * K) + 1, y0 + 1)
-        x0, y0, x1, y1 = max(0, x0), max(0, y0), min(W, x1), min(H, y1)
-        if x1 <= x0 or y1 <= y0:
-            continue
-        m = _v252_encre_du_bloc(bl)
-        if m is None:
-            B[y0:y1, x0:x1] = True
-            continue
-        hh, ww = y1 - y0, x1 - x0
-        if m.shape != (hh, ww):
-            im = _Im247.fromarray(m.astype(_np247.uint8) * 255).resize((max(ww, 1), max(hh, 1)), _Im247.NEAREST)
-            m = _np247.array(im) > 127
-        B[y0:y1, x0:x1] |= m[:hh, :ww]
-    rad = max(1, int(round((_V252_REUNION_MM * 72.0 / 25.4) * K / 2)))
-    B = _v252_dilate_croix(B, rad)
-    lab = _v247_etiqueter(B, huit=False)
-    plancher = int(_V252_PLANCHER_MM * 72.0 / 25.4 * K)
-    ys, xs = _np247.nonzero(lab)
-    if len(ys) == 0:
-        return []
-    labs = lab[ys, xs]
-    n = int(labs.max()) + 1
-    miny = _np247.full(n, H); maxy = _np247.full(n, -1); minx = _np247.full(n, W); maxx = _np247.full(n, -1)
-    _np247.minimum.at(miny, labs, ys); _np247.maximum.at(maxy, labs, ys)
-    _np247.minimum.at(minx, labs, xs); _np247.maximum.at(maxx, labs, xs)
-    out = []
-    for l in _np247.unique(labs):
-        y0, y1 = int(miny[l]) + rad, int(maxy[l]) + 1 - rad
-        x0, x1 = int(minx[l]) + rad, int(maxx[l]) + 1 - rad
-        if x1 - x0 >= plancher and y1 - y0 >= plancher:
-            out.append(fitz.Rect(x0 / K, y0 / K, x1 / K, y1 / K))
-    return out
-
-
-def _v252_couverte(rect, fenetres, K=2.0):
-    """La part (0-1) de `rect` couverte par l'union des `fenetres` (rasterisée à 2 px/pt, comme le juge du banc)."""
-    w, h = int(rect.width * K) + 1, int(rect.height * K) + 1
-    if w <= 1 or h <= 1:
-        return 0.0
-    M = _np247.zeros((h, w), dtype=bool)
-    for f in fenetres:
-        q = rect & fitz.Rect(f)
-        if q.is_empty:
-            continue
-        M[int((q.y0 - rect.y0) * K):int((q.y1 - rect.y0) * K) + 1, int((q.x0 - rect.x0) * K):int((q.x1 - rect.x0) * K) + 1] = True
-    return float(M.mean())
-
-
-def _v247_coupe(R, elem, intrus, prof=0):
-    """Garde tout l'élément, retire le plus d'intrus, ≤ 6 coupes le long de lignes vides."""
-    x0, y0, x1, y1 = R
-    e = elem[y0:y1, x0:x1]
-    it = intrus[y0:y1, x0:x1]
-    if not e.any():
-        return []
-    if not it.any() or prof >= 6:
-        return [R]
-    meilleur, gain0 = None, 0
-    lig = e.any(axis=1)
-    col = e.any(axis=0)
-    tot = it.sum()
-    for y in range(1, y1 - y0):
-        if not lig[y]:
-            reste = (it[:y].sum() if e[:y].any() else 0) + (it[y:].sum() if e[y:].any() else 0)
-            gain = tot - reste
-            if gain > gain0:
-                gain0, meilleur = gain, ('h', y)
-    for x in range(1, x1 - x0):
-        if not col[x]:
-            reste = (it[:, :x].sum() if e[:, :x].any() else 0) + (it[:, x:].sum() if e[:, x:].any() else 0)
-            gain = tot - reste
-            if gain > gain0:
-                gain0, meilleur = gain, ('v', x)
-    if meilleur is None:
-        return [R]
-    if meilleur[0] == 'h':
-        y = meilleur[1]
-        return (_v247_coupe((x0, y0, x1, y0 + y), elem, intrus, prof + 1)
-                + _v247_coupe((x0, y0 + y, x1, y1), elem, intrus, prof + 1))
-    x = meilleur[1]
-    return (_v247_coupe((x0, y0, x0 + x, y1), elem, intrus, prof + 1)
-            + _v247_coupe((x0 + x, y0, x1, y1), elem, intrus, prof + 1))
-
-
-def _v247_serrer(R, elem):
-    x0, y0, x1, y1 = R
-    e = elem[y0:y1, x0:x1]
-    if not e.any():
-        return None
-    ys, xs = _np247.where(e)
-    return (int(x0 + xs.min()), int(y0 + ys.min()), int(x0 + xs.max() + 1), int(y0 + ys.max() + 1))
-
-
-def _v247_absorber(rects):
-    rects = sorted(rects, key=lambda r: -(r[2] - r[0]) * (r[3] - r[1]))
-    gardes = []
-    for r in rects:
-        if any(r[0] >= q[0] and r[1] >= q[1] and r[2] <= q[2] and r[3] <= q[3] for q in gardes):
-            continue
-        gardes.append(r)
-    return gardes
-
-
-def _v247_dilate(m, r, E):
-    return (_np247.array(_Im247.fromarray((m * 255).astype(_np247.uint8)).filter(_If247.MaxFilter(2 * r + 1))) > 0) & E
-
-
-def _v249_masque_contour(chemins, R, K, H_, W_, E):
-    """v2.49 : le masque des contours de décor — chaque segment, côté de rectangle ou courbe tracé à ± 2 px, en pixels de la région R à l'échelle K ; & E."""
-    im = _Im247.new('L', (W_, H_), 0); dr = _Id249.Draw(im)
-    def P(p): return ((p.x - R.x0) * K, (p.y - R.y0) * K)
-    def bez(p0, p1, p2, p3, n=16):
-        pts = []
-        for k in range(n + 1):
-            t = k / n; u = 1 - t
-            pts.append((u*u*u*p0[0] + 3*u*u*t*p1[0] + 3*u*t*t*p2[0] + t*t*t*p3[0], u*u*u*p0[1] + 3*u*u*t*p1[1] + 3*u*t*t*p2[1] + t*t*t*p3[1]))
-        return pts
-    for items in chemins:
-        for it in items:
-            try:
-                if it[0] == 'l': dr.line([P(it[1]), P(it[2])], fill=255, width=5)
-                elif it[0] == 're':
-                    q = it[1]; a, b, c, d = P(fitz.Point(q.x0, q.y0)), P(fitz.Point(q.x1, q.y0)), P(fitz.Point(q.x1, q.y1)), P(fitz.Point(q.x0, q.y1)); dr.line([a, b, c, d, a], fill=255, width=5)
-                elif it[0] == 'qu':
-                    q = it[1]; dr.line([P(q.ul), P(q.ur), P(q.lr), P(q.ll), P(q.ul)], fill=255, width=5)
-                elif it[0] == 'c': dr.line(bez(P(it[1]), P(it[2]), P(it[3]), P(it[4])), fill=255, width=5)
-            except Exception:
-                pass
-    return (_np247.array(im) > 0) & E
-
-
-def _v247_decouper_page(page, fenetres, tableaux, mots, L, texte, cases, decor):
-    """Les morceaux de chaque fenêtre de la page.
-    fenetres : liste de dict {clip: Rect, tableau: bool, ...} ; rend, pour chaque fenêtre,
-    {'pieces': [Rect pt], 'mots': [indices de mots], 'entier': Rect, 'sans_dessin': bool}
-    et le compte des mots attachés."""
-    K = _V247_K
-    n = len(fenetres)
-    glyphes = [i for i in range(len(mots)) if _v247_est_glyphe(i, mots, L, texte)]
-    boites = {i: fitz.Rect(mots[i][:4]) for i in glyphes}
-    # 1. l'appartenance à un tableau : sans distance
-    attribution = {}          # mot -> fenêtre
-    for k, f in enumerate(fenetres):
-        if not f.get('tableau'):
-            continue
-        T = f['clip']
-        for i in glyphes:
-            b = boites[i]
-            if i in attribution:
-                continue
-            if T.contains(fitz.Point((b.x0 + b.x1) / 2, (b.y0 + b.y1) / 2)):
-                attribution[i] = k
-    # 2. pour chaque fenêtre : la région, l'encre, les intrus, les éléments, le dessin
-    etats = []
-    for k, f in enumerate(fenetres):
-        W = f['clip']
-        R = fitz.Rect(W.x0 - _V247_MARGE, W.y0 - _V247_MARGE, W.x1 + _V247_MARGE, W.y1 + _V247_MARGE) & page.rect
-        pm = page.get_pixmap(matrix=fitz.Matrix(K, K), clip=R, alpha=False)
-        A = _np247.frombuffer(pm.samples, dtype=_np247.uint8).reshape(pm.height, pm.width, pm.n)[:, :, :3]
-        E = (255 - A.min(axis=2)) >= _V247_ECART
-        H_, W_ = E.shape
-
-        def px(bx):
-            q = bx & R
-            return (int((q.x0 - R.x0) * K), int((q.y0 - R.y0) * K),
-                    int(_np247.ceil((q.x1 - R.x0) * K)), int(_np247.ceil((q.y1 - R.y0) * K)))
-
-        def masque_de(rects, anneau=0, dil=0):
-            m = _np247.zeros_like(E)
-            for r in rects:
-                q = fitz.Rect(r) & R
-                if q.is_empty:
-                    continue
-                x0, y0 = int((q.x0 - R.x0) * K) - dil, int((q.y0 - R.y0) * K) - dil
-                x1, y1 = int(_np247.ceil((q.x1 - R.x0) * K)) + dil, int(_np247.ceil((q.y1 - R.y0) * K)) + dil
-                if anneau:
-                    m[max(0, y0 - anneau):min(H_, y0 + anneau), max(0, x0 - anneau):min(W_, x1 + anneau)] = True
-                    m[max(0, y1 - anneau):min(H_, y1 + anneau), max(0, x0 - anneau):min(W_, x1 + anneau)] = True
-                    m[max(0, y0 - anneau):min(H_, y1 + anneau), max(0, x0 - anneau):min(W_, x0 + anneau)] = True
-                    m[max(0, y0 - anneau):min(H_, y1 + anneau), max(0, x1 - anneau):min(W_, x1 + anneau)] = True
-                else:
-                    m[max(0, y0):min(H_, y1), max(0, x0):min(W_, x1)] = True
-            return m & E
-        lignes_txt = [fitz.Rect(mots[i][:4]) for i in range(len(mots))
-                      if _v247_est_ligne(i, L, texte) and not (fitz.Rect(mots[i][:4]) & R).is_empty]
-        ponct = [fitz.Rect(mots[i][:4]) for i in range(len(mots))
-                 if (not _v247_est_ligne(i, L, texte)) and mots[i][4] and mots[i][4][-1] in _V247_PONCT
-                 and not (fitz.Rect(mots[i][:4]) & R).is_empty]
-        T = masque_de(lignes_txt) | masque_de(ponct)
-        # v2.49 — l'anneau du décor suit son contour, pas le rectangle qui l'entoure : les coins arrondis d'un cadre pointillé n'échappent plus
-        D = _v247_dilate(_v249_masque_contour([it for (rd, it) in decor if not (rd & R).is_empty], R, K, H_, W_, E), 2, E)
-        # l'intérieur n'est jamais effacé : une fenêtre qui contient W n'est pas un intrus ; une fenêtre contenue dans une
-        # fenêtre-tableau non plus (elle lui appartient) ; un tableau qui tient la moitié de W n'est pas un intrus pour W ;
-        # v2.48 — deux dessins qui se chevauchent ne sont jamais des intrus l'un pour l'autre : une fenêtre qui croise W
-        # (aire non nulle) n'est pas retirée de W
-        autres = [g['clip'] for j, g in enumerate(fenetres) if j != k and not g['clip'].contains(W)
-                  and not (f.get('tableau') and W.contains(g['clip']))
-                  and not (g.get('tableau') and (W & g['clip']).get_area() >= 0.5 * W.get_area())
-                  and (g['clip'] & W).is_empty]
-        O = masque_de(autres)
-        F0 = E & ~(T | D | O)
-        lab0 = _v247_etiqueter(_v247_dilate(F0, 1, _np247.ones_like(E, dtype=bool)))
-        cases_isolees = []
-        for c in cases:
-            q = c & R
-            if q.is_empty or c.contains(W) or _v247_en_bande(c, cases):
-                continue
-            x0, y0, x1, y1 = px(c)
-            labs = _np247.unique(lab0[max(0, y0 - 2):min(H_, y1 + 2), max(0, x0 - 2):min(W_, x1 + 2)])
-            labs = labs[labs > 0]
-            if not len(labs):
-                continue
-            dehors = 0
-            for lb in labs:
-                ys, xs = _np247.where(lab0 == lb)
-                if xs.min() < x0 - 4 or ys.min() < y0 - 4 or xs.max() > x1 + 4 or ys.max() > y1 + 4:
-                    dehors += 1
-            if dehors == 0:
-                cases_isolees.append(c)
-        # v2.48 — on n'efface jamais ce qu'il y a dans une case : une case isolée n'efface que son bord, l'anneau de ± 2 px autour de sa boîte
-        C = masque_de(cases_isolees, anneau=2)
-        I = T | C | D | O
-        F = E & ~I
-        lab = _v247_etiqueter(_v247_dilate(F, 1, _np247.ones_like(E, dtype=bool)))
-        wx0, wy0, wx1, wy1 = px(W)
-        labs = _np247.unique(lab[wy0:wy1, wx0:wx1])
-        labs = labs[labs > 0]
-        corps = _np247.isin(lab, labs) & F if len(labs) else _np247.zeros_like(F)
-        G = masque_de([boites[i] for i in glyphes if not (boites[i] & R).is_empty], dil=1)
-        dessin = corps & ~G
-        etats.append(dict(R=R, E=E, F=F, I=I, corps=corps, dessin=dessin, a_dessin=bool(dessin.any()), lab=lab, labs=labs, px=px))
-    # 3. les mots à 6 mm ou moins : la fenêtre la plus proche, une seule
-    for i in glyphes:
-        if i in attribution:
-            continue
-        b = boites[i]
-        meilleur = None
-        portee = int(_np247.ceil(_V247_DIST_MM / _V247_MM * K)) + 1   # 6 mm en pixels : seule l'encre à cette portée compte
-        for k, st in enumerate(etats):
-            R = st['R']
-            if (b & R).is_empty or not st['a_dessin']:
-                continue
-            x0, y0, x1, y1 = st['px'](b)
-            des = st['dessin']
-            sy0, sy1 = max(0, y0 - portee), min(des.shape[0], y1 + portee)
-            sx0, sx1 = max(0, x0 - portee), min(des.shape[1], x1 + portee)
-            tranche = des[sy0:sy1, sx0:sx1]
-            if not tranche.any():
-                continue
-            ys, xs = _np247.where(tranche)
-            ys = ys + sy0
-            xs = xs + sx0
-            dx = _np247.maximum(0, _np247.maximum(x0 - xs, xs - (x1 - 1)))
-            dy = _np247.maximum(0, _np247.maximum(y0 - ys, ys - (y1 - 1)))
-            d = float(_np247.sqrt(dx * dx + dy * dy).min()) / K * _V247_MM
-            if d <= _V247_DIST_MM and (meilleur is None or d < meilleur[0]):
-                meilleur = (d, k)
-        if meilleur is not None:
-            attribution[i] = meilleur[1]
-    # 4. les morceaux
-    resultats = []
-    for k, f in enumerate(fenetres):
-        st = etats[k]
-        R, F, I, corps, lab, labs = st['R'], st['F'], st['I'], st['corps'], st['lab'], st['labs']
-        px = st['px']
-        elements = []
-        for lb in labs:
-            m = (lab == lb) & F
-            nn = int(m.sum())
-            if nn < _V247_BRUIT:
-                continue
-            ys, xs = _np247.where(m)
-            elements.append((m, (int(xs.min()), int(ys.min()), int(xs.max() + 1), int(ys.max() + 1))))
-        rects = []
-        for m, bb in elements:
-            for r in _v247_coupe(bb, m, I):
-                s = _v247_serrer(r, m)
-                if s:
-                    rects.append(s)
-        rects = _v247_absorber(rects)
-        mots_k = [i for i, kk in attribution.items() if kk == k]
-        for i in mots_k:
-            b = boites[i] & R
-            if b.is_empty:
-                continue
-            x0, y0, x1, y1 = px(boites[i])
-            g = st['E'][y0:y1, x0:x1]
-            if not g.any():
-                continue
-            ys, xs = _np247.where(g)
-            rects.append((int(x0 + xs.min()), int(y0 + ys.min()), int(x0 + xs.max() + 1), int(y0 + ys.max() + 1)))
-        rects = _v247_absorber(rects)
-        K = _V247_K
-        pieces = [fitz.Rect(R.x0 + x0 / K, R.y0 + y0 / K, R.x0 + x1 / K, R.y0 + y1 / K) for (x0, y0, x1, y1) in rects]
-        pieces.sort(key=lambda r: (round(r.y0), r.x0))
-        entier = None
-        if pieces:
-            entier = fitz.Rect(min(p.x0 for p in pieces), min(p.y0 for p in pieces),
-                               max(p.x1 for p in pieces), max(p.y1 for p in pieces))
-        resultats.append(dict(pieces=pieces, mots=mots_k, entier=entier, sans_dessin=not bool(corps.any())))
-    return resultats, len(attribution)
-
-
-def _v247_absorber_rects(rects):
-    """Un rectangle (pt) contenu dans un autre de la même figure disparaît."""
-    rects = sorted(rects, key=lambda r: -(r.width * r.height))
-    gardes = []
-    for r in rects:
-        if any(q.contains(r) for q in gardes):
-            continue
-        gardes.append(r)
-    return gardes
-
-
-def _v247_ancres(figs):
-    """v2.36 touchée : une ancre par FIGURE, posée sur son premier morceau, au cadre entier."""
-    return [dict(f, cadre=(f.get("entier_cadre") or f["cadre"])) for f in figs if f.get("morceau", 1) == 1]
-
-
-def parse_pdf(content: bytes, filename: str, api_key=None, corrige_pages=None):
+def parse_pdf(content: bytes, filename: str):
     """
     Extrait d'un PDF, dans l'ordre de lecture :
     - les images raster (photos, dessins importés)
@@ -1795,8 +1417,11 @@ def parse_pdf(content: bytes, filename: str, api_key=None, corrige_pages=None):
     v2.7 : clustering par composantes connexes, marge 10 pt.
     """
     doc = fitz.open(stream=content, filetype="pdf")
-    # v2.38 — les deux chiffres de la divergence (image d'origine / photographie), comptés pendant la lecture et rendus
-    # dans la réponse : un compte qui n'est pas rendu n'est pas un compte.
+    # v2.38 — LES DEUX CHIFFRES DE LA DIVERGENCE, comptés pendant la lecture et
+    # rendus dans la réponse. Catherine, 19.08.2026 : « le journal de la version
+    # doit dire le chiffre : combien de figures reçoivent la vraie image,
+    # combien restent en photographie. » Un compte qui n'est pas rendu n'est pas
+    # un compte.
     _v238_compte = {}
     images = []
     full_text = []
@@ -1808,18 +1433,10 @@ def parse_pdf(content: bytes, filename: str, api_key=None, corrige_pages=None):
     n_c11 = 0                  # v2.34 — cadres sans aucun dessin (C11)
     n_ancres = 0               # v2.36 — marqueurs de position posés
     n_ancres_hors = 0          # v2.36 — figures sans ancre, comptées à part
-    # v2.52 — le jugement corrigé : sa règle, lue par Sonnet 5 ; ce que l'outil fait d'une page jugée corrigé ne change
-    # pas (le `continue` ci-dessous). `corrige_pages` donné : pages déjà jugées (la symbiose sur une découpe).
-    _v252_compte = _v252_compte_vide()
-    corrige = set(corrige_pages) if corrige_pages is not None else _v252_pages_de_corrige(doc, api_key, _v252_compte)
-    _s245_ajouts = {}        # v2.45 — index ajouté -> grille d'origine (S1)
-    _s245_grilles_pos = []   # v2.45 — grilles des pages de contenu (S2)
-    _v247_compte = {"figures": 0, "morceaux": 0, "mots_attaches": 0, "tableaux": 0, "tableaux_ajoutes": 0,
-                    "tableaux_non_cherches": 0, "fenetres_sans_dessin": 0, "traits_absorbes": 0,
-                    "morceaux_trop_petits": 0, "pages_en_repli": 0, "derniere_erreur": ""}   # v2.47
+    corrige = pages_de_corrige(doc)   # V2.20 — figures ET texte de ces pages restent dehors
 
     for pno, page in enumerate(doc):
-        if (pno + 1) in corrige:      # page jugée corrigé : rien n'en part
+        if (pno + 1) in corrige:      # V2.20 — page de corrigé : rien n'en part
             continue
         pw, ph = page.rect.width, page.rect.height
         page_area = pw * ph
@@ -1863,9 +1480,13 @@ def parse_pdf(content: bytes, filename: str, api_key=None, corrige_pages=None):
                 texte_page += "\n" + "\n".join(b[2] for b in sorted(blocs_formes))
                 blocs_page = None       # v2.36 — ajout hors blocs : on s'abstient
 
-        # v2.5 — les lignes fines ne partent que si la page parle de mesure ou de tracé (mots-clés ci-dessous) : sur une
-        # fiche de français, les lignes de réponse aux longueurs variées traverseraient le filtre « familles ».
-        # (voir JOURNAL BACKEND v2.5)
+        # v2.5 — les lignes fines ne partent que si la page parle de mesure ou
+        # de tracé : sur une fiche de français, les lignes de réponse aux
+        # longueurs variées traversent le filtre « familles » (28 fausses
+        # lignes sur la série de conjugaison 5P) et noieraient le modèle sous
+        # des « segments » sans objet. Mots-clés calibrés sur les 9 sources :
+        # les pages segments/périmètres/aires/quadrillages en contiennent
+        # toutes au moins un, aucune page de français n'en contient.
         if thins:
             ptxt = page.get_text("text").lower()
             if not (any(k in ptxt for k in (
@@ -1928,8 +1549,9 @@ def parse_pdf(content: bytes, filename: str, api_key=None, corrige_pages=None):
             if key in seen:
                 continue
             seen.add(key)
-            # v2.33 — même doctrine en aval : le plancher des 24 pt écarte les miettes de traits ; appliqué aux images il
-            # jetait des figures collées, qui gardent le plancher de 8 pt.
+            # v2.33 — même doctrine en aval : le plancher des 24 pt a été
+            # calibré pour écarter les MIETTES DE TRAITS ; appliqué aux images
+            # il jetait les pions (23,6 × 35,1 pt, à 0,4 pt du seuil).
             _img33 = any(not (ra & r).is_empty
                          and (ra & r).get_area() >= 0.9 * min(ra.get_area(), r.get_area())
                          for ra in rasters)
@@ -1949,13 +1571,11 @@ def parse_pdf(content: bytes, filename: str, api_key=None, corrige_pages=None):
             dans_tableau = any(not (r & z).is_empty
                                and (r & z).get_area() >= 0.6 * r.get_area()
                                for z in zones_grilles)
-            # v2.47 — V2.10 gardée, restreinte : un tableau qui porte un chiffre ou une étiquette est une figure ; un tableau
-            # qui ne porte que des lignes de texte reste du texte.
             if dans_tableau and not any(
                     not (r & ra).is_empty
                     and (r & ra).get_area() >= 0.5 * min(r.get_area(),
                                                          ra.get_area())
-                    for ra in rasters) and not _v247_porte_un_glyphe(page, r):
+                    for ra in rasters):
                 continue
             keep.append(r)
 
@@ -1976,8 +1596,10 @@ def parse_pdf(content: bytes, filename: str, api_key=None, corrige_pages=None):
                     if not (cadre.contains(r)
                             or (not (r & cadre).is_empty
                                 and (r & cadre).get_area() >= 0.6 * r.get_area()))]
-            # v2.33 — LE CADRE SUIT LA SCÈNE, PAS LA TABLE. Condition : un objet (dessiné ou collé) touche la bande par le
-            # dessus ou le dessous, dans son emprise horizontale. Effet : le cadre l'emporte. Jeu : 12 pt.
+            # v2.33 — LE CADRE SUIT LA SCÈNE, PAS LA TABLE. Condition : un objet
+            # (dessiné ou collé) touche la bande par le dessus ou le dessous, dans
+            # son emprise horizontale. Effet : le cadre l'emporte. Le jeu de 12 pt
+            # est mesuré : à 30 pt, deux bandes voisines fusionnent (témoin T5).
             _haut33 = fitz.Rect(cadre.x0 - 3, cadre.y0 - 12, cadre.x1 + 3, cadre.y0)
             _bas33 = fitz.Rect(cadre.x0 - 3, cadre.y1, cadre.x1 + 3, cadre.y1 + 12)
             for _z33 in (_haut33, _bas33):
@@ -2000,10 +1622,36 @@ def parse_pdf(content: bytes, filename: str, api_key=None, corrige_pages=None):
             keep.append(cadre)
 
         # ══ v2.17 — UNE FORME À MOITIÉ DANS LA ZONE Y EST PRISE ENTIÈRE ═════
-        # Une forme vectorielle est absorbée par le cadre de découpe si : 40 % au moins de sa surface est déjà dans le
-        # cadre (MAJORITÉ) ; elle fait 75 pt au plus (TAILLE) ; elle ne porte PAS de texte encore dehors (une étiquette
-        # ou un badge est un rectangle fermé comme un rond : l'avaler imprimerait son texte deux fois).
-        # Ce qu'il ne fait pas : une forme dedans à moins de 40 % reste fragmentée. (voir JOURNAL BACKEND v2.17)
+        # Défaut mesuré le 02.08.2026 sur SIX documents sources (151 zones) :
+        # 20 formes vectorielles sont AMPUTÉES par le cadre de découpe — un rond
+        # de la démonstration CP perd 47 % de sa surface, une autre forme 81 %.
+        # Un rond incomplet, sur une fiche qui enseigne « j'en dessine un de
+        # plus », n'est pas une imperfection : il empêche de faire l'exercice.
+        # Cause : le cadre est construit sur la PHOTO ; les traits vectoriels qui
+        # font partie du même dessin ne sont pas absorbés.
+        #
+        # CE QUI A ÉTÉ MESURÉ, ET POURQUOI CES TROIS NOMBRES (panel_marges_2.py,
+        # dix-huit candidats de familles différentes) :
+        #  · MAJORITÉ 40 % — une forme dont 40 % est déjà dans le cadre en fait
+        #    partie ; une forme que le cadre effleure appartient au voisinage.
+        #    Le plateau mesuré va de 25 % à 50 % (20 formes réparées, aucun coût) ;
+        #    à 20 % une voisine est avalée, à 60 % trois formes restent coupées.
+        #    40 % est le milieu du plateau, pas son bord.
+        #  · TAILLE ≤ 75 pt — plateau mesuré de 60 à 90 pt ; à 100 pt, six
+        #    voisines avalées et +5 % de surface ; à 45 pt, cinq formes ratées.
+        #    Sans limite du tout : quatre mots avalés, six voisines, +7 %.
+        #  · JAMAIS UNE FORME QUI PORTE DU TEXTE encore dehors : une étiquette
+        #    « 3 + … » ou le badge « CP » est un rectangle fermé comme un rond.
+        #    L'avaler imprimerait son texte DEUX fois — une fois en clair, une
+        #    fois dans l'image. Cette garde retire 2 mots avalés sur 2.
+        # Résultat : 20 formes réparées sur 20, zéro mot avalé, zéro voisine
+        # avalée, +0 % de surface moyenne.
+        #
+        # CE QUE CE REMÈDE NE FAIT PAS, et c'est déclaré : trois formes des six
+        # documents (une flèche de la fiche CP 16b, un polygone de l'évaluation
+        # 5P) sont dedans à 26–28 % et restent donc fragmentées. Les prendre
+        # exigerait un seuil de 25 % qui est sur le fil du rasoir : à 20 %, une
+        # voisine est avalée. Choix assumé : le plateau plutôt que l'optimum.
         _MAX_FORME = 75.0        # côté maximal d'une forme absorbable, en points
         _PART_MINI = 0.40        # part déjà dans le cadre pour qu'elle en fasse partie
         try:
@@ -2029,10 +1677,30 @@ def parse_pdf(content: bytes, filename: str, api_key=None, corrige_pages=None):
         except Exception:
             pass          # une page illisible ne doit pas faire tomber l'extraction
 
-        # ══ v2.16 — LES RANGÉES DE LECTURE S'ANCRENT SUR LES ZONES, PLUS SUR UNE GRILLE FIXE ═══
-        # La rangée s'ancre sur la PREMIÈRE zone rencontrée : les zones sont triées par hauteur ; tant qu'une zone commence à
-        # moins de 24 pt du début de la rangée en cours, elle est de cette rangée ; chaque rangée est lue de gauche à droite.
-        # (voir JOURNAL BACKEND v2.16)
+        # ══ v2.16 — LES RANGÉES DE LECTURE S'ANCRENT SUR LES ZONES, PLUS SUR
+        # UNE GRILLE FIXE ═══════════════════════════════════════════════════
+        # Défaut mesuré le 02.08.2026, fiche i-profs CP 8a (tirage 10275) : les
+        # deux panneaux de la démonstration « ajouter / enlever » sont côte à
+        # côte, à 2,9 points de hauteur près — y0 = 249,8 (droite) et 252,7
+        # (gauche). Le découpage en tranches FIXES de 24 points tombe entre les
+        # deux : 249,8/24 = 10,41 → 10 ; 252,7/24 = 10,53 → 11. Le panneau de
+        # DROITE part donc avant celui de GAUCHE, et sur la feuille
+        # l'illustration « j'en barre un » se retrouve sous « Pour ajouter 1 ».
+        # Les deux images du tirage sont identiques OCTET POUR OCTET à celles que
+        # ce tri livre : l'inversion naît ici, pas dans le modèle.
+        #
+        # LA CAUSE EST LA GRILLE FIXE, PAS SA TAILLE. Deux zones d'une même
+        # rangée peuvent toujours tomber de part et d'autre d'une frontière,
+        # quelle que soit la largeur choisie. Agrandir la tranche déplacerait la
+        # frontière sans la supprimer.
+        #
+        # LE REMÈDE : la rangée s'ancre sur la PREMIÈRE zone rencontrée, pas sur
+        # un multiple de 24. Les zones sont triées par hauteur ; tant qu'une zone
+        # commence à moins de 24 points du début de la rangée en cours, elle est
+        # de cette rangée. Chaque rangée est ensuite lue de gauche à droite.
+        # La tolérance de 24 points est CELLE D'AVANT, inchangée : seul son point
+        # d'ancrage change. Tout document dont les zones ne tombaient pas sur une
+        # frontière garde donc exactement l'ordre qu'il avait.
         _TOL_RANGEE = 24
         _tri = sorted(keep, key=lambda r: (r.y0, r.x0))
         _rangees, _cour, _debut = [], [], None
@@ -2051,12 +1719,36 @@ def parse_pdf(content: bytes, filename: str, api_key=None, corrige_pages=None):
             _rg.sort(key=lambda r: r.x0)
             keep.extend(_rg)
 
-        # ══ LA ZONE EST PHOTOGRAPHIÉE, PAS EXTRAITE ══
-        # CONDITION : une zone a été retenue comme figure. EFFET : elle est RENDUE — photographiée telle qu'elle se voit
-        # sur la page (traits, texte et images ensemble), et non extraite du PDF comme objet image ; la même image sert au
-        # modèle (miniature) et à la feuille. Matrix(2,2) sur 72 ppp = 144 ppp. (voir JOURNAL BACKEND v2.38)
+        # ══ POURQUOI ON PHOTOGRAPHIE LA ZONE AU LIEU D'EXTRAIRE L'IMAGE ══
+        # Raison écrite le 19.08.2026 : elle manquait ici depuis toujours,
+        # alors que six décisions de ce fichier portent la leur (v2.20, v2.21,
+        # v2.30, v2.32, v2.33, v2.34). C'est la seule décision non justifiée du
+        # fichier, et c'est celle qui décide de quoi est faite l'image que
+        # l'élève reçoit.
+        #
+        # CONDITION : une zone a été retenue comme figure.
+        # EFFET : elle est RENDUE — photographiée telle qu'elle se voit sur la
+        #   page — et non extraite du PDF comme objet image.
+        # RAISON : la même image sert DEUX FOIS. Elle est envoyée au modèle
+        #   comme miniature, et posée sur la feuille de l'élève. Le modèle doit
+        #   voir la zone TELLE QU'ELLE EST — traits, texte et images ensemble —
+        #   ce qu'aucun objet image du fichier ne montre à lui seul. Une zone
+        #   peut d'ailleurs ne contenir AUCUNE image : sur les 17 documents du
+        #   corpus, les pages portent 8 338 tracés pour 137 images.
+        #   (voir JOURNAL FRONTEND v10.70, 27.07.2026 : « les figures extraites
+        #    servent AUSSI de miniatures envoyées au modèle »)
+        #
+        # ⚠ CE QUE CE CHOIX COÛTE, ET IL EST MESURÉ (19.08.2026) : 202 figures
+        #   sur 202, sur les 17 documents, sont des photographies — AUCUNE n'est
+        #   l'image posée par l'enseignante. La feuille de l'élève reçoit donc
+        #   toujours un rendu à 144 ppp, jamais l'original.
+        #   LA PISTE EST OUVERTE AU JOURNAL DEPUIS LE 27.07.2026 et n'a jamais
+        #   été reprise : « monter la définition d'extraction reste souhaitable
+        #   le jour où les miniatures envoyées au modèle seront DÉCOUPLÉES des
+        #   images posées sur la fiche. » (JOURNAL FRONTEND v10.70)
+        #
+        # Matrix(2,2) sur 72 ppp = 144 ppp. Rasterisation 2x de chaque zone.
         page_words = page.get_text("words")
-        _v247_fenetres = []   # v2.47 — les fenêtres retenues de la page, découpées après les portes
         for r in keep:
             try:
                 # Lignes fines : dilater le clip pour que le trait soit
@@ -2085,8 +1777,12 @@ def parse_pdf(content: bytes, filename: str, api_key=None, corrige_pages=None):
                             letters += sum(1 for ch in w[4] if ch.isalpha())
                     if letters >= 3:
                         continue
-                # V2.22 — LE DÉCOR SE SIGNALE, NE SE SUPPRIME PAS : petite figure ancrée aux marges (badge de niveau,
-                # cartouche d'éditeur, pastille « Fiche N », ruban latéral), hauteur ≥ 8 mm exigée. (voir JOURNAL BACKEND v2.22)
+                # V2.22 — LE DÉCOR SE SIGNALE, NE SE SUPPRIME PAS (F1, visage D).
+                # Signature mesurée à l'œil sur 7 sources (6/6, 0 fausse
+                # alerte) : petite figure ancrée aux marges — badge rond de
+                # niveau, cartouche d'éditeur, pastille « Fiche N », ruban
+                # latéral. Une barre fine de titre (32×4) n'est PAS prise
+                # (hauteur >= 8 mm exigée). (voir JOURNAL BACKEND v2.22)
                 # V2.26 — les micros qui TOUCHENT ce cadre (≤ 3 pt) l'étendent.
                 for _mi26 in micros_page:
                     if fitz.Rect(clip.x0 - 3, clip.y0 - 3,
@@ -2100,13 +1796,18 @@ def parse_pdf(content: bytes, filename: str, api_key=None, corrige_pages=None):
                 # V2.21 — un réceptacle de réponse ne part pas en image (B7) ;
                 # son contenu est déjà dans le texte, le frontend pose la case.
                 _t_clip = page.get_text(clip=clip)
-                # v2.32 — UNE GRILLE DÉCLARÉE N'EST PAS UN RÉCEPTACLE. Condition : le cadre vient du module des grilles.
-                # Effet : la porte des réceptacles ne s'applique pas — la nature d'une grille est jugée par le module, pas
-                # deux fois. (voir JOURNAL BACKEND v2.32)
+                # v2.32 — UNE GRILLE DECLAREE N'EST PAS UN RECEPTACLE. Condition :
+                # le cadre vient du module des grilles. Effet : la porte des
+                # receptacles ne s'applique pas — une bande de 12 chiffres (piste
+                # de jeu, frise) n'est pas un « … + … = … ». Source unique : la
+                # nature d'une grille est jugee par le module, pas deux fois.
+                # (voir JOURNAL BACKEND v2.32)
                 _ne_grille = (round(r.x0, 1), round(r.y0, 1),
                               round(r.x1, 1), round(r.y1, 1)) in cadres_grille
-                # v2.33 — symétrique de la 2.32 : une case à remplir est une zone VIDE, jamais une image ; une scène qui
-                # tient un nombre n'est pas une case. (voir JOURNAL BACKEND v2.33)
+                # v2.33 — symétrique de la 2.32 : une case à remplir est une zone
+                # VIDE, jamais une image. La porte v2.21 jugeait le seul texte de
+                # la découpe et tuait toute scène tenant un nombre (les grenouilles
+                # sur « 47 », le garçon à l'ardoise « 9 + 4 »).
                 _imgr33 = any(not (ra & clip).is_empty
                               and (ra & clip).get_area() >= 0.5 * min(ra.get_area(), clip.get_area())
                               for ra in rasters)
@@ -2115,176 +1816,57 @@ def parse_pdf(content: bytes, filename: str, api_key=None, corrige_pages=None):
                     continue
                 import re as _re21
                 _mots_clip = len(_re21.findall(r"[A-Za-zàâçéèêëîïôöûüù]{2,}", _t_clip))
-                # v2.34 — C11 : un cadre sans dessin n'est pas transmis (voir _v234_porte_un_dessin) ; une grille déclarée
-                # n'est jamais une fausse figure : sa nature est jugée par le module des grilles, pas deux fois.
+                # ══ v2.34 — UN CADRE SANS DESSIN N'EST PAS UNE FIGURE (C11) ══
+                # Condition : le cadre ne porte aucun objet dessiné.
+                # Effet : il n'est pas transmis.
+                # (voir JOURNAL BACKEND v2.34)
+                # UNE GRILLE DÉCLARÉE N'EST JAMAIS UNE FAUSSE FIGURE : sa
+                # nature est jugée par le module des grilles, pas deux fois
+                # (même principe que la v2.32). Défaut attrapé le 12.08 par le
+                # témoin T3 de la batterie 2.33 : une bande de nombres tracée
+                # au TRAIT n'a aucun objet dessiné au sens du filtre — chaque
+                # trait fait moins de 20 pt² — et disparaissait. Sur le CP-50,
+                # une bande reconstruite perd les couleurs de ses cases.
                 if not _ne_grille and not _v234_porte_un_dessin(page, clip, rasters):
                     n_c11 += 1
                     continue
-                # v2.47 — la fenêtre a passé les portes : elle est découpée après (voir _v247_*)
-                _v247_fenetres.append({"clip": fitz.Rect(clip), "mots_clip": _mots_clip,
-                                       "decor": bool(_decor_), "tableau": bool(_ne_grille),
-                                       "thin": bool(is_thin)})
+                pix = page.get_pixmap(clip=clip, matrix=fitz.Matrix(2, 2))
+                if pix.width < 8 or pix.height < 8:
+                    continue
+                _png30 = pix.tobytes("png")
+                _v238_extra, _v238_voie = _v238_champs(doc, page, clip, _mots_clip)
+                b64 = base64.b64encode(_png30).decode()
+                images.append({
+                    # v2.30 — chaque figure porte son cadre en PLEINES décimales
+                    # et le sceau de son contenu (sha-256 du PNG, 12 hex).
+                    # Condition : la figure est retenue. Effet : dire QUOI est
+                    # découpé, pas seulement combien. (voir JOURNAL BACKEND v2.30)
+                    "cadre": [clip.x0, clip.y0, clip.x1, clip.y1],
+                    "sceau": _hl.sha256(_png30).hexdigest()[:12],
+                    # V2.21 — une figure qui porte des mots se SIGNALE, elle ne se
+                    # supprime jamais : une scène concrète (bulle, étiquette de
+                    # wagon) vaut plus que la règle (arbitrage du 10.08, K.5).
+                    **({"mots_taches": _mots_clip} if _mots_clip >= 6 else {}),
+                    **({"decor_probable": True} if _decor_ else {}),
+                    "index": idx,
+                    "page": pno + 1,
+                    "data": f"data:image/png;base64,{b64}",
+                    "w": pix.width, "h": pix.height,
+                    # Taille PHYSIQUE de la zone rasterisée dans le document
+                    # source (points PDF → mm : 1 pt = 25.4/72 mm). Permet au
+                    # frontend d'imprimer la figure à taille réelle
+                    # (class="img-echelle") pour la mesure à la règle.
+                    "w_mm": round(clip.width * 25.4 / 72, 1),
+                    "h_mm": round(clip.height * 25.4 / 72, 1),
+                    # v2.38 — LA DIVERGENCE : voir l'en-tête de `_v238_champs`.
+                    # `data` ci-dessus part au MODÈLE et n'est pas touché ;
+                    # ces champs-ci ne servent qu'à LA FEUILLE DE L'ÉLÈVE.
+                    **_v238_extra,
+                })
+                _v238_compte[_v238_voie] = _v238_compte.get(_v238_voie, 0) + 1
+                idx += 1
             except Exception:
                 pass
-
-        # v2.52 — E1 : les fenêtres d'encre des images en ligne entrent ici, quand les portes ont rendu les fenêtres de la page
-        # (C11 comprise) : couverte à 50 % ou plus par elles, une fenêtre d'encre est le même dessin et ne double rien ;
-        # sinon elle est une figure de plus, découpée comme les autres — une image (elle rejoint les rasters), jamais regroupée.
-        for _r252 in _v252_fenetres_encre(page):
-            if _v252_couverte(_r252, [g["clip"] for g in _v247_fenetres]) < 0.5:
-                import re as _re252
-                rasters.append(_r252)
-                _v247_fenetres.append({"clip": fitz.Rect(_r252), "tableau": False, "decor": False, "thin": False,
-                                       "mots_clip": len(_re252.findall(r"[A-Za-zàâçéèêëîïôöûüù]{2,}", page.get_text(clip=_r252)))})
-        # ══ v2.47 — LA DÉCOUPE EN MORCEAUX (bloc _v247_* ci-dessus) ══
-        # Condition : la page a des fenêtres retenues. Effet : chaque fenêtre devient une FIGURE faite de MORCEAUX, chacun
-        # une image de la liste avec sa place et sa marque ; les tableaux de la page deviennent des figures ; les mots à
-        # 6 mm partent avec leur figure. En cas d'accroc, la page retombe sur la découpe 2.46 (une image par fenêtre),
-        # comptée `pages_en_repli` — rien n'est perdu.
-        _v247_appendus_page = 0
-        try:
-            _v247_mots, _v247_L, _v247_texte = _v247_lignes(page)
-            _v247_cases, _v247_decor = _v247_cases_et_decor(page)
-            _v247_tabs, _v247_nc = _v247_tableaux(page, _v247_cases)
-            _v247_compte["tableaux_non_cherches"] += _v247_nc
-            _v247_tabs = _v247_fusionner_tableaux(_v247_tabs)   # les cellules d'un quadrillage sont un seul tableau
-            _v247_compte["tableaux"] += len(_v247_tabs)
-            for _t in _v247_tabs:
-                _t = _t & page.rect
-                if _t.width < 8 or _t.height < 8 or (_t.width * _t.height) > 0.85 * page_area:
-                    continue
-                # un tableau qui ne porte ni image ni chiffre ni étiquette est du texte : pas une figure
-                if not (any(not (_t & _ra).is_empty for _ra in rasters) or _v247_porte_un_glyphe(page, _t)):
-                    _v247_compte["tableaux_de_texte"] = _v247_compte.get("tableaux_de_texte", 0) + 1
-                    continue
-                _couv = [g for g in _v247_fenetres
-                         if (not (_t & g["clip"]).is_empty) and (_t & g["clip"]).get_area() >= 0.6 * _t.get_area()]
-                if _couv:
-                    for g in _couv:
-                        g["tableau"] = True
-                else:
-                    _v247_fenetres.append({"clip": _t, "mots_clip": 0, "decor": False,
-                                           "tableau": True, "thin": False})
-                    _v247_compte["tableaux_ajoutes"] += 1
-            _v247_res, _v247_n_mots = _v247_decouper_page(
-                page, _v247_fenetres, _v247_tabs, _v247_mots, _v247_L, _v247_texte,
-                _v247_cases, _v247_decor)
-            _v247_compte["mots_attaches"] += _v247_n_mots
-            # ce qui est à l'intérieur d'un tableau lui appartient : chaque morceau d'une fenêtre
-            # ordinaire dont le centre est dans une fenêtre-tableau devient un morceau du tableau
-            _v247_tabs_idx = [_j for _j, _t in enumerate(_v247_fenetres) if _t["tableau"]]
-            _v247_pieces_par_fig = {}
-            _v247_verses = set()
-            for _k, g in enumerate(_v247_fenetres):
-                for _p in _v247_res[_k]["pieces"]:
-                    _cible = _k
-                    if not g["tableau"]:
-                        _c = fitz.Point((_p.x0 + _p.x1) / 2, (_p.y0 + _p.y1) / 2)
-                        for _j in _v247_tabs_idx:
-                            if _v247_fenetres[_j]["clip"].contains(_c):
-                                _cible = _j
-                                _v247_verses.add(_k)
-                                break
-                    _v247_pieces_par_fig.setdefault(_cible, []).append(_p)
-            _v247_parent = {_k: 0 for _k in _v247_verses if not _v247_pieces_par_fig.get(_k)}
-            _v247_compte["fenetres_versees_au_tableau"] = _v247_compte.get("fenetres_versees_au_tableau", 0) + len(_v247_parent)
-            _v247_couverts = set()
-            for _k, g in enumerate(_v247_fenetres):
-                if not g["thin"] or _k in _v247_parent:
-                    continue
-                for _j, g2 in enumerate(_v247_fenetres):
-                    if _j == _k or g2["thin"] or _j in _v247_parent:
-                        continue
-                    if any(((p & g["clip"]).get_area() >= 0.8 * g["clip"].get_area())
-                           for p in _v247_pieces_par_fig.get(_j, []) if not (p & g["clip"]).is_empty):
-                        _v247_couverts.add(_k)
-                        break
-            _v247_compte["traits_absorbes"] += len(_v247_couverts)
-            for _k, g in enumerate(_v247_fenetres):
-                if _k in _v247_parent or _k in _v247_couverts:
-                    continue
-                _pieces = _v247_absorber_rects([p & page.rect for p in _v247_pieces_par_fig.get(_k, [])
-                                                if not (p & page.rect).is_empty])
-                if not _pieces:
-                    _v247_compte["fenetres_sans_dessin"] += 1
-                    continue
-                _pieces.sort(key=lambda r: (round(r.y0), r.x0))
-                _fig_id = "p%d-f%d" % (pno + 1, _k)
-                _entier = fitz.Rect(min(p.x0 for p in _pieces), min(p.y0 for p in _pieces),
-                                    max(p.x1 for p in _pieces), max(p.y1 for p in _pieces))
-                _entrees = []
-                for _p in _pieces:
-                    _p = _v247_au_moins(_p, 4.0, page.rect)   # un trait, un point : 8 px au moins
-                    pix = page.get_pixmap(clip=_p, matrix=fitz.Matrix(2, 2))
-                    if pix.width < 8 or pix.height < 8:
-                        _v247_compte["morceaux_trop_petits"] += 1
-                        continue
-                    _png30 = pix.tobytes("png")
-                    _mots_p = len(re.findall(r"[A-Za-zàâçéèêëîïôöûüù]{2,}", page.get_text(clip=_p) or ""))
-                    _v238_extra, _v238_voie = _v238_champs(doc, page, _p, _mots_p)
-                    _entree = {
-                        "cadre": [_p.x0, _p.y0, _p.x1, _p.y1],
-                        "sceau": _hl.sha256(_png30).hexdigest()[:12],
-                        **({"mots_taches": g["mots_clip"]} if g["mots_clip"] >= 6 else {}),
-                        **({"decor_probable": True} if g["decor"] else {}),
-                        **({"tableau": True} if g["tableau"] else {}),
-                        "index": idx,
-                        "page": pno + 1,
-                        "data": "data:image/png;base64," + base64.b64encode(_png30).decode(),
-                        "w": pix.width, "h": pix.height,
-                        "w_mm": round(_p.width * 25.4 / 72, 1),
-                        "h_mm": round(_p.height * 25.4 / 72, 1),
-                        "figure": _fig_id,
-                        "morceau": len(_entrees) + 1,
-                        "n_morceaux": 0,
-                        **_v238_extra,
-                    }
-                    images.append(_entree)
-                    _entrees.append(_entree)
-                    _v238_compte[_v238_voie] = _v238_compte.get(_v238_voie, 0) + 1
-                    idx += 1
-                if not _entrees:
-                    _v247_compte["fenetres_sans_dessin"] += 1
-                    continue
-                for _e in _entrees:
-                    _e["n_morceaux"] = len(_entrees)
-                if len(_entrees) > 1:
-                    _pe = page.get_pixmap(clip=_entier & page.rect, matrix=fitz.Matrix(2, 2))
-                    _entrees[0]["entier"] = "data:image/png;base64," + base64.b64encode(_pe.tobytes("png")).decode()
-                    _entrees[0]["entier_cadre"] = [_entier.x0, _entier.y0, _entier.x1, _entier.y1]
-                _v247_compte["figures"] += 1
-                _v247_compte["morceaux"] += len(_entrees)
-                _v247_appendus_page += len(_entrees)
-        except Exception as _e247:
-            _v247_compte["pages_en_repli"] += 1
-            _v247_compte["derniere_erreur"] = (str(_e247) or type(_e247).__name__)[:160]
-            for g in _v247_fenetres:
-                if g["tableau"] and g.get("mots_clip") == 0 and _v247_appendus_page == 0 and False:
-                    continue
-                try:
-                    clip = g["clip"]
-                    pix = page.get_pixmap(clip=clip, matrix=fitz.Matrix(2, 2))
-                    if pix.width < 8 or pix.height < 8:
-                        continue
-                    _png30 = pix.tobytes("png")
-                    _v238_extra, _v238_voie = _v238_champs(doc, page, clip, g["mots_clip"])
-                    images.append({
-                        "cadre": [clip.x0, clip.y0, clip.x1, clip.y1],
-                        "sceau": _hl.sha256(_png30).hexdigest()[:12],
-                        **({"mots_taches": g["mots_clip"]} if g["mots_clip"] >= 6 else {}),
-                        **({"decor_probable": True} if g["decor"] else {}),
-                        "index": idx, "page": pno + 1,
-                        "data": "data:image/png;base64," + base64.b64encode(_png30).decode(),
-                        "w": pix.width, "h": pix.height,
-                        "w_mm": round(clip.width * 25.4 / 72, 1),
-                        "h_mm": round(clip.height * 25.4 / 72, 1),
-                        "figure": "p%d-repli%d" % (pno + 1, idx), "morceau": 1, "n_morceaux": 1,
-                        **_v238_extra,
-                    })
-                    _v238_compte[_v238_voie] = _v238_compte.get(_v238_voie, 0) + 1
-                    idx += 1
-                except Exception:
-                    pass
 
         for g in grilles_page:
             grilles_inventaire.append({
@@ -2309,281 +1891,22 @@ def parse_pdf(content: bytes, filename: str, api_key=None, corrige_pages=None):
                 "aire_refusee": f["aire_refusee"],
             })
 
-        # ══ v2.39 — LA DISTANCE SOUS UNE FIGURE EST CELLE DE LA SOURCE ══
-        # L'espace entre le bas de la figure et la première chose qui vient en dessous (texte, autre figure, tableau) est
-        # reporté tel quel ; rien en dessous, ou distance inconnue : aucune marge n'est ajoutée. Les boîtes complètes sont
-        # relues ici : les blocs rendus par `_texte_gras` n'ont pas de bord droit, et « en dessous » demande la largeur.
-        # (voir JOURNAL BACKEND v2.39)
-        _v239_distance_sous(page, images[i0_page:])
-
         # v2.36 — R1 : les figures de CETTE page reçoivent leur marqueur de
         # position dans le texte, à l'endroit où l'œil les rencontre.
         texte_page, _n_pose, _n_hors = poser_ancres(
-            texte_page, blocs_page, _v247_ancres(images[i0_page:]),   # v2.47 — une ancre par figure
+            texte_page, blocs_page, images[i0_page:],
             getattr(_grilles, "cle_lecture", None) if _grilles else None)
         n_ancres += _n_pose
         n_ancres_hors += _n_hors
 
         full_text.append(texte_page)
 
-        # ══ v2.45 — S1 : LES SUPPORTS NON TRANSMIS DEVIENNENT DES FIGURES ══
-        # (voir l'en-tête ; le texte de la page est DÉJÀ posé : rien n'y bouge)
-        if GRILLES_ACTIVES and grilles_page:
-            try:
-                _s245_candidats = []
-                for _g45 in grilles_page:
-                    _r45 = fitz.Rect(_g45["rect"]) & page.rect
-                    if _r45.is_empty:
-                        continue
-                    _couv45 = False
-                    for _f45 in images:
-                        if _f45.get("page") != pno + 1:
-                            continue
-                        _i45 = _r45 & fitz.Rect(_f45["cadre"])
-                        if not _i45.is_empty and _i45.get_area() >= 0.8 * _r45.get_area():
-                            _couv45 = True
-                            break
-                    if _couv45:
-                        continue
-                    # v2.46 — la frontière prend la place du compteur de mots : une grille qui porte un dessin ou une
-                    # couleur part en figure, telle quelle ; toute autre grille reste au texte.
-                    if not _v246_porte_dessin_ou_couleur(page, _r45):
-                        continue
-                    _s245_candidats.append((_r45.y0, _r45.x0, _g45, _r45))
-                for _y45, _x45, _g45, _r45 in sorted(_s245_candidats,
-                                                     key=lambda c: (c[0], c[1])):
-                    clip45 = fitz.Rect(_r45)
-                    # le cadre suit le DESSIN : bord droit étendu aux mots chevauchants
-                    _cl45 = (_g45.get("case_l_mm") or 8.0) * 72 / 25.4
-                    _mx45 = clip45.x1
-                    for _w45 in page.get_text("words"):
-                        _wr45 = fitz.Rect(_w45[:4])
-                        _cy45 = (_wr45.y0 + _wr45.y1) / 2
-                        if (clip45.y0 <= _cy45 <= clip45.y1
-                                and _wr45.x1 > clip45.x1 - 0.2 * _cl45
-                                and _wr45.x0 < clip45.x1 + 1.2 * _cl45):
-                            _mx45 = max(_mx45, _wr45.x1 + 0.34 * _cl45)
-                    clip45.x1 = _mx45
-                    clip45 = fitz.Rect(clip45.x0 - 1.5, clip45.y0 - 1.5,
-                                       clip45.x1 + 1.5, clip45.y1 + 1.5) & page.rect
-                    pix45 = page.get_pixmap(clip=clip45, matrix=fitz.Matrix(2, 2))
-                    if pix45.width < 8 or pix45.height < 8:
-                        continue
-                    _png45 = pix45.tobytes("png")
-                    _t45c = page.get_text("text", clip=clip45)
-                    _mots45 = len(re.findall(r"[A-Za-zàâçéèêëîïôöûüù]{2,}", _t45c))
-                    _extra45, _voie45 = _v238_champs(doc, page, clip45, _mots45)
-                    _fig45 = {"cadre": [clip45.x0, clip45.y0, clip45.x1, clip45.y1],
-                              "sceau": _hl.sha256(_png45).hexdigest()[:12]}
-                    if _mots45 >= 6:
-                        _fig45["mots_taches"] = _mots45
-                    _fig45.update({"index": idx, "page": pno + 1,
-                                   "data": "data:image/png;base64,"
-                                           + base64.b64encode(_png45).decode(),
-                                   "w": pix45.width, "h": pix45.height,
-                                   "w_mm": round(clip45.width * 25.4 / 72, 1),
-                                   "h_mm": round(clip45.height * 25.4 / 72, 1)})
-                    _fig45.update(_extra45)
-                    images.append(_fig45)
-                    _v238_compte[_voie45] = _v238_compte.get(_voie45, 0) + 1
-                    _s245_ajouts[idx] = {"page": pno + 1,
-                                         "rect": list(fitz.Rect(_g45["rect"]))}
-                    idx += 1
-            except Exception:
-                pass
-        if GRILLES_ACTIVES and grilles_page:
-            for _g45 in grilles_page:
-                _s245_grilles_pos.append({
-                    "page": pno + 1, "rect": list(fitz.Rect(_g45["rect"])),
-                    "nature": _g45.get("nature"),
-                    "case_l_mm": _g45.get("case_l_mm"),
-                    "case_h_mm": _g45.get("case_h_mm")})
-
-    # ══ v2.45 — S2 : CHAQUE SUPPORT REÇOIT SON TEXTE SOUS LA MARQUE ══════
-    # Le champ `text` ne bouge pas ; seuls les BLOCS sortent, dans l'ordre de lecture. En cas d'accroc, le champ dit
-    # pourquoi au lieu de se taire. (voir JOURNAL BACKEND v2.45)
-    _s245_marques = ""
-    try:
-        _S245_TOK = re.compile(r"\[TAILORY_IMG_(\d+)\]")
-        _S245_DECL = re.compile(r"^\[(quadrillage|tableau) .*\]")
-        _S245_COMPT = re.compile(r"^\[comptage non transmis[^\]]*\]")
-        _S245_CELL = re.compile(r"^[^|]*\|[^|]*\|")
-        _s245_texte = "\n".join(full_text)
-        _s245_transmises = [f for f in images if f["index"] not in _s245_ajouts]
-        _s245_pages_contenu = sorted({f["page"] for f in images}
-                                     | {g["page"] for g in _s245_grilles_pos})
-
-        def _s245_centre_dans(bb, cadre, marge=1.0):
-            cx, cy = (bb[0] + bb[2]) / 2.0, (bb[1] + bb[3]) / 2.0
-            return (cadre[0] - marge <= cx <= cadre[2] + marge
-                    and cadre[1] - marge <= cy <= cadre[3] + marge)
-
-        def _s245_couvert(rect, cadre, seuil=0.8):
-            r = fitz.Rect(rect) & fitz.Rect(cadre)
-            if r.is_empty:
-                return False
-            a = fitz.Rect(rect).get_area()
-            return a > 0 and r.get_area() >= seuil * a
-
-        _s245_recolte = {}
-        for _p45 in _s245_pages_contenu:
-            if _p45 in corrige or _p45 > len(doc):
-                continue
-            _page45 = doc[_p45 - 1]
-            _gr45 = [fitz.Rect(g["rect"]) for g in _s245_grilles_pos
-                     if g["page"] == _p45]
-            _d45 = _page45.get_text("dict")
-            for _b45 in _d45["blocks"]:
-                if _b45.get("type") != 0:
-                    continue
-                for _li45 in _b45["lines"]:
-                    _t45 = " ".join(s["text"].strip() for s in _li45["spans"]
-                                    if s["text"].strip())
-                    _t45 = re.sub(r"\s+", " ", _t45).strip()
-                    if not _t45:
-                        continue
-                    _bb45 = _li45["bbox"]
-                    if any(_s245_centre_dans(_bb45, [r.x0, r.y0, r.x1, r.y1])
-                           for r in _gr45):
-                        continue
-                    for _f45 in _s245_transmises:
-                        if (_f45["page"] == _p45
-                                and _s245_centre_dans(_bb45, _f45["cadre"])):
-                            _s245_recolte.setdefault(_p45, []).append(
-                                [_t45, _f45["index"], 1])
-                            break
-
-        def _s245_sans_espace(t):
-            return t.replace(" ", "")
-
-        def _s245_apparie(nu, pno1):
-            pool = _s245_recolte.get(pno1, [])
-            nu_c = _s245_sans_espace(nu)
-            for e in pool:
-                if e[2] and _s245_sans_espace(e[0]) == nu_c:
-                    e[2] = 0
-                    return e[1]
-            for sup in {e[1] for e in pool if e[2]}:
-                libres = [e for e in pool if e[2] and e[1] == sup]
-                reste = nu
-                pris = []
-                change = True
-                while reste and change:
-                    change = False
-                    for e in libres:
-                        ec = _s245_sans_espace(e[0])
-                        if e[2] and _s245_sans_espace(reste).startswith(ec):
-                            pris.append(e)
-                            rc = _s245_sans_espace(reste)[len(ec):]
-                            j = 0
-                            k = 0
-                            while (j < len(reste)
-                                   and k < len(_s245_sans_espace(reste)) - len(rc)):
-                                if reste[j] != " ":
-                                    k += 1
-                                j += 1
-                            reste = reste[j:].strip()
-                            e[2] = 0
-                            change = True
-                            break
-                if not reste and pris:
-                    return sup
-                for e in pris:
-                    e[2] = 1
-            return None
-
-        _s245_file = sorted(_s245_grilles_pos,
-                            key=lambda g: (g["page"], g["rect"][1], g["rect"][0]))
-
-        def _s245_grille_suivante(pno1):
-            for g in _s245_file:
-                if g["page"] == pno1:
-                    _s245_file.remove(g)
-                    return g
-            return None
-
-        def _s245_support_de(g):
-            if g is None:
-                return None, None
-            for _ia45, _ga45 in _s245_ajouts.items():
-                if (_ga45.get("page") == g["page"]
-                        and list(fitz.Rect(_ga45["rect"])) == g["rect"]):
-                    return "ajout", _ia45
-            for f in _s245_transmises:
-                if f["page"] == g["page"] and _s245_couvert(g["rect"], f["cadre"]):
-                    return "couvert", f["index"]
-            return "libre", None
-
-        _s245_page_fig = {f["index"]: f["page"] for f in _s245_transmises}
-        _s245_sortie = []
-        _s245_bloc_tab = None
-        _s245_page_cour = (_s245_pages_contenu[0]
-                           if _s245_pages_contenu else 1)
-        _s245_ouverte = [None]
-        _s245_derniere_decl = [None]
-
-        def _s245_ferme():
-            if _s245_ouverte[0] is not None:
-                _s245_sortie.append("⟦/support⟧")
-                _s245_ouverte[0] = None
-
-        def _s245_ouvre(n):
-            if _s245_ouverte[0] != n:
-                _s245_ferme()
-                _s245_sortie.append("⟦support %d — à lire seulement⟧" % n)
-                _s245_ouverte[0] = n
-
-        for _brut45 in _s245_texte.split("\n"):
-            _toks45 = _S245_TOK.findall(_brut45)
-            if _toks45:
-                _pg45 = max(_s245_page_fig.get(int(t), _s245_page_cour)
-                            for t in _toks45)
-                if _pg45 > _s245_page_cour:
-                    _s245_page_cour = _pg45
-            _nu45 = _S245_TOK.sub("", _brut45).strip()
-            _nu45 = re.sub(r"\s+", " ", _nu45)
-            _sort45, _n45 = "garde", None
-            if _S245_DECL.match(_nu45):
-                _g45x = _s245_grille_suivante(_s245_page_cour)
-                _typ45, _n45 = _s245_support_de(_g45x)
-                _sort45 = "support" if _typ45 in ("ajout", "couvert") else "garde"
-                _s245_bloc_tab = ((_sort45, _n45)
-                                  if _g45x and _g45x.get("nature") == "tableau"
-                                  else None)
-                _s245_derniere_decl[0] = (_typ45, _n45)
-            elif _S245_COMPT.match(_nu45):
-                if (_s245_derniere_decl[0]
-                        and _s245_derniere_decl[0][0] in ("ajout", "couvert")):
-                    _sort45, _n45 = "support", _s245_derniere_decl[0][1]
-                else:
-                    _sort45 = "garde"
-            elif _S245_CELL.match(_nu45) and _s245_bloc_tab:
-                _sort45, _n45 = _s245_bloc_tab
-            else:
-                if _nu45:
-                    _s245_bloc_tab = None
-                    _sup45 = _s245_apparie(_nu45, _s245_page_cour)
-                    if _sup45 is not None:
-                        _sort45, _n45 = "support", _sup45
-            if _sort45 == "garde" or _n45 is None:
-                _s245_ferme()
-            else:
-                _s245_ouvre(_n45)
-                _s245_sortie.append(_nu45)
-        _s245_ferme()
-        _s245_b = "\n".join(_s245_sortie)
-        _s245_marques = "\n".join(re.findall(
-            r"(⟦support \d+ — à lire seulement⟧.*?⟦/support⟧)", _s245_b, re.S))
-    except Exception as _e45:
-        _s245_marques = "[supports_marques indisponibles : %s]" % _e45
-
     doc.close()
     return {
         "filename": filename,
         "pdf_mode": True,
-        # v2.52 — les pages jugées corrigé, déclarées (jamais en silence)
+        # V2.20 — pages écartées comme corrigé, DÉCLARÉES (jamais en silence)
         "corrige_pages": sorted(corrige),
-        "corrige_lecture": _v252_compte,   # v2.52 — la marque machine du lecteur
         # V2.21 — zones de production déclarées + réceptacles écartés, comptés
         "zones_libres": zones_libres,
         "receptacles_ecartes": n_receptacles,
@@ -2606,7 +1929,6 @@ def parse_pdf(content: bytes, filename: str, api_key=None, corrige_pages=None):
         "num_exercises": 0,
         "num_images": len(images),
         "images": images,
-        "decoupe": _v247_compte,   # v2.47 — le recompte des morceaux, rendu
         "text": "\n".join(full_text),
         "exercises": [],
         # V2.10 — inventaire des grilles rencontrées, pour le journal et pour
@@ -2617,8 +1939,6 @@ def parse_pdf(content: bytes, filename: str, api_key=None, corrige_pages=None):
         # réelle ou refus motivé.
         "formes": formes_inventaire,
         "formes_actives": FORMES_ACTIVES,
-        # v2.45 — S2 : les passages des supports sous la marque, dans l'ordre de lecture
-        "supports_marques": _s245_marques,
     }
 
 # ─────────────────────────────────────────────
@@ -2707,10 +2027,27 @@ def rasterize_blobs(jobs):
 
 
 # ─────────────────────────────────────────────
-# V2.15 — TOUS LES FORMATS BUREAUTIQUES PASSENT PAR LIBREOFFICE (odt, doc, rtf… — et le .docx depuis la V2.40) :
-# ils empruntent la route → PDF, donc le modèle VOIT les pages. La lecture directe des paragraphes (v2.35) reste dans
-# la pièce mais n'est plus atteinte par le .docx. (voir JOURNAL BACKEND v2.15 et v2.40)
-FORMATS_BUREAUTIQUES = ("docx", "odt", "doc", "rtf", "ott", "fodt", "sxw", "wps", "abw")
+# ─────────────────────────────────────────────
+# V2.15 — TOUS LES FORMATS BUREAUTIQUES PASSENT PAR LIBREOFFICE
+#
+# Le serveur n'acceptait que odt, docx et pdf. Une enseignante qui dépose un
+# vieux .doc — le format le plus répandu dans les classes — recevait « format
+# non supporté » et refermait l'outil. Or LibreOffice tourne déjà sur ce
+# serveur pour les ODT, et il ouvre nativement doc, rtf, odf et le reste.
+# Le commentaire de la v2.14 le disait déjà : « le même mécanisme fonctionnerait
+# pour doc/rtf si besoin un jour ». C'était une ligne.
+#
+# Le gain n'est pas seulement l'acceptation. Ces documents empruntent la route
+# ODT → PDF, donc le modèle VOIT les pages, au lieu de ne recevoir qu'un texte
+# extrait. C'est le meilleur des chemins disponibles.
+#
+# LE DOCX N'EST PAS DANS CETTE LISTE, ET C'EST VOLONTAIRE. Le faire basculer
+# ici règlerait le défaut connu des zones de texte flottantes (invisibles à
+# python-docx : ordre des jours, barème par item et titre perdus sur l'essai
+# des saisons). Mais c'est un changement de pipeline pour un format qui MARCHE
+# aujourd'hui : il se mesure sur un document témoin avant d'être fait, pas en
+# même temps qu'une ouverture de formats. C'est le chantier v2.10 nº 1.
+FORMATS_BUREAUTIQUES = ("odt", "doc", "rtf", "ott", "fodt", "sxw", "wps", "abw")
 
 # ODT (et formats bureautiques) : conversion → PDF via LibreOffice
 # La route ODT→PDF est volontaire : les ODT contiennent souvent des formes
@@ -2748,391 +2085,35 @@ def convert_office_to_pdf(content: bytes, ext: str):
 
 
 # ─────────────────────────────────────────────
-# V2.15 — LE SERVEUR ANNONCE LES FORMATS QU'IL SAIT LIRE : la page l'affiche, elle n'a pas de liste à elle.
-# Porte du dépôt : ce que /formats annonce à la page ; les routes de conversion (FORMATS_BUREAUTIQUES) restent servies aux
-# appels directs. (voir JOURNAL BACKEND v2.15 et v2.42)
-FORMATS_PORTE = ("pdf", "txt")
+# V2.15 — LE SERVEUR ANNONCE LES FORMATS QU'IL SAIT LIRE
+#
+# La page portait sa propre liste d'extensions, écrite en dur. Deux sources de
+# vérité : le jour où le serveur apprend un format, personne ne pense à mettre
+# la page à jour, et la capacité existe sans être offerte — c'est exactement ce
+# qui vient de se passer avec le .doc. Le serveur est le seul à savoir ce qu'il
+# sait ouvrir : il le dit, la page l'affiche.
+FORMATS_ACCEPTES = tuple(sorted(set(FORMATS_BUREAUTIQUES + ("pdf", "docx", "txt"))))
 
 
 @app.get("/formats")
 async def formats_acceptes():
-    """Ce que la porte du dépôt accepte. La page s'en sert pour son filtre
-    de fichier et son message de refus. (voir JOURNAL v2.42)"""
-    return {"formats": list(FORMATS_PORTE)}
+    """Liste des extensions que /parse sait traiter. La page s'en sert pour
+    construire son filtre de fichier et son message d'erreur — elle n'en tient
+    plus sa propre copie."""
+    return {
+        "formats": list(FORMATS_ACCEPTES),
+        "bureautiques": list(FORMATS_BUREAUTIQUES),
+        "note": "les formats bureautiques passent par LibreOffice puis par le "
+                "pipeline PDF : le modèle voit alors les pages",
+    }
 
 
 # ─────────────────────────────────────────────
-# ENDPOINT : /parse — DOCX / PDF / ODT → structure JSON pédagogique
+# ENDPOINT : /parse
+# DOCX / PDF / ODT → structure JSON pédagogique
 # ─────────────────────────────────────────────
-# ═══ v2.43 — LA SYMBIOSE : LE MODÈLE VISE, LE CODE DÉCIDE, LE SERVEUR REDÉCOUPE ═══
-# Condition : /parse reçoit un champ facultatif `api_key` ET le document est un PDF. Sans clé, RIEN ne change.
-# Effet : (1) le modèle juge L'USAGE des tracés et des textes visibles, par tuiles numérotées, UN jugement par famille
-#         de jumeaux ; (2) les décors jugés « ne sert pas » sont caviardés (tracé entier touché ; texte retiré dans sa
-#         boîte ; les images ne sont JAMAIS touchées) ; (3) les amas de matière libérée sont retaillés en pages seules et
-#         REDONNÉS à parse_pdf lui-même — les découpes récupérées rejoignent le tableau `images`, cadres replacés,
-#         indices continus. Un champ additif `symbiose` dit tout (tuiles jouées/non jugées, familles, jetons,
-#         récupérées) ; une tuile illisible est NON JUGÉE et DITE, jamais complétée ; une panne de l'étage rend le
-#         parse d'aujourd'hui, avec l'erreur DITE. (voir JOURNAL BACKEND v2.43)
-# v2.51 — la gomme juge avec Opus 5.5.
-_S243_MODELE = "claude-opus-5-5"
-_S243_TUILE_MAX = 110
-_S243_COLLE = 14.0
-_S243_MIN_COTE = 12.0
-_S243_MIN_AIRE = 900.0
-_S243_DEMANDE = (
-    "Voici une bande découpée dans une page de fiche d'école. Des ÉLÉMENTS y "
-    "sont entourés en orange et numérotés T1, T2… (des tracés — traits, "
-    "cadres, cases, fonds — et des lignes de texte). La règle qui décide, "
-    "mot pour mot : « Ce qui doit rester sur la feuille, c'est ce qui sert à "
-    "l'élève. Une case où il écrit, une bande qu'il lit, une figure qu'il "
-    "regarde. Le reste part. » Pour CHAQUE numéro de la liste, rends un "
-    "jugement d'USAGE : \"sert\" (à l'élève) · \"ne sert pas\" (décor, "
-    "habillage d'éditeur, cartouche, pastille, cadre décoratif, consigne que "
-    "l'outil réécrit ailleurs) · \"ne vois pas\". Réponds UNIQUEMENT par un "
-    "bloc JSON : {\"verdicts\":[{\"n\":1,\"v\":\"sert\"}]} — chaque numéro, "
-    "EXACTEMENT une fois. La liste : ")
-
-
-def _s243_famille(bb):
-    return (round((bb[2] - bb[0]) * 2) / 2, round((bb[3] - bb[1]) * 2) / 2)
-
-
-def _s243_items_de_page(page):
-    """(tracés uniques {bbox: famille}, lignes de texte visibles [(bbox, txt)])."""
-    traces = {}
-    for g in page.get_drawings():
-        r = g["rect"]
-        bb = (round(r.x0, 2), round(r.y0, 2), round(r.x1, 2), round(r.y1, 2))
-        traces[bb] = _s243_famille(bb)
-    textes = []
-    for b in page.get_text("dict")["blocks"]:
-        if b["type"] != 0:
-            continue
-        for l in b.get("lines", []):
-            t = "".join(s.get("text", "") for s in l.get("spans", []))
-            if t.strip():
-                textes.append((tuple(l["bbox"]), t.strip()))
-    return traces, textes
-
-
-def _s243_tuile_png(page, lot):
-    """L'image de la tuile, éléments numérotés. lot : [(num, bbox)]."""
-    y0 = max(0.0, min(b[1] for _n, b in lot) - 6)
-    y1 = min(page.rect.height, max(b[3] for _n, b in lot) + 6)
-    clip = fitz.Rect(0, y0, page.rect.width, y1)
-    g = min(4.0, 1500.0 / max(clip.width, clip.height))
-    pm = page.get_pixmap(clip=clip, matrix=fitz.Matrix(g, g))
-    d = fitz.open()
-    p2 = d.new_page(width=pm.width, height=pm.height)
-    p2.insert_image(fitz.Rect(0, 0, pm.width, pm.height), pixmap=pm)
-    for num, bb in lot:
-        rr = fitz.Rect((bb[0] - clip.x0) * g - 1, (bb[1] - clip.y0) * g - 1,
-                       (bb[2] - clip.x0) * g + 1, (bb[3] - clip.y0) * g + 1)
-        p2.draw_rect(rr, color=(1, 0.45, 0), width=1.2)
-        p2.insert_text((rr.x0 + 1, max(12, rr.y0 - 3)), "T%d" % num,
-                       fontsize=11, color=(0.85, 0.1, 0))
-    png = p2.get_pixmap(matrix=fitz.Matrix(1, 1)).tobytes("png")
-    d.close()
-    return png
-
-
-def _s243_depouille(texte, numeros):
-    """La partition exacte des numéros, ou la faute — jamais un trou."""
-    try:
-        deb = texte.index("{")
-        fin = texte.rindex("}")
-        rep = json.loads(texte[deb:fin + 1])
-    except (ValueError, json.JSONDecodeError):
-        return None, "réponse illisible"
-    if not isinstance(rep, dict) or not isinstance(rep.get("verdicts"), list):
-        return None, "réponse illisible"
-    vus = {}
-    for v in rep["verdicts"]:
-        try:
-            n = int(v["n"])
-            verdict = str(v["v"]).strip().lower()
-        except (KeyError, TypeError, ValueError):
-            return None, "entrée illisible"
-        if verdict not in ("sert", "ne sert pas", "ne vois pas") or n in vus:
-            return None, "verdict inconnu ou numéro en double"
-        vus[n] = verdict
-    if any(n not in vus for n in numeros) or any(n not in numeros for n in vus):
-        return None, "numéros manquants ou inconnus"
-    return vus, None
-
-
-def _s243_juge_tuile(api_key, png, liste_txt, numeros):
-    """UN appel au modèle des tirages pour UNE tuile. Rend (verdicts | None, faute | None, jetons_in, jetons_out).
-    Une passe — coupée = non jugée. Une panne d'appel (réseau, surcharge, clé) est une faute de TUILE comme une
-    autre : rendue, jamais levée."""
-    try:
-        client = anthropic.Anthropic(api_key=api_key, timeout=600.0)
-        # v2.51 — l'effort « high » seulement quand le modèle est Opus 5.5. La réflexion compte dans max_tokens (8 000) : une
-        # réponse coupée est une tuile non jugée, dite et reprise une fois (v2.43) — rien n'est effacé.
-        rep = client.messages.create(
-            model=_S243_MODELE, max_tokens=8000,
-            **({"output_config": {"effort": "high"}} if _S243_MODELE == "claude-opus-5-5" else {}),
-            messages=[{"role": "user", "content": [
-                {"type": "text", "text": _S243_DEMANDE + liste_txt},
-                {"type": "image", "source": {"type": "base64",
-                                             "media_type": "image/png",
-                                             "data": base64.b64encode(png).decode()}}]}])
-    except Exception as e:
-        return None, "panne d'appel : %s" % type(e).__name__, 0, 0
-    j_in = getattr(rep.usage, "input_tokens", 0) or 0
-    j_out = getattr(rep.usage, "output_tokens", 0) or 0
-    if rep.stop_reason == "max_tokens":
-        return None, "réponse coupée", j_in, j_out
-    texte = "".join(b.text for b in rep.content if getattr(b, "type", "") == "text")
-    verdicts, faute = _s243_depouille(texte, numeros)
-    return verdicts, faute, j_in, j_out
-
-
-def _s243_point_sur_trace(path):
-    it = path["items"][0]
-    if it[0] == "l":
-        return ((it[1].x + it[2].x) / 2, (it[1].y + it[2].y) / 2)
-    if it[0] == "re":
-        return (it[1].x0, (it[1].y0 + it[1].y1) / 2)
-    if it[0] == "qu":
-        return (it[1].ul.x, it[1].ul.y)
-    return (it[1].x, it[1].y)
-
-
-def _s243_points_candidats(path):
-    """Les points possibles où poser la gomme, tous SUR la géométrie de CE
-    tracé. Le premier est le point d'hier (_s243_point_sur_trace)."""
-    pts = [_s243_point_sur_trace(path)]
-    for it in path["items"]:
-        if it[0] == "l":
-            pts += [(it[1].x, it[1].y), (it[2].x, it[2].y)]
-        elif it[0] == "re":
-            r = it[1]
-            pts += [((r.x0 + r.x1) / 2, r.y0), (r.x1, (r.y0 + r.y1) / 2),
-                    ((r.x0 + r.x1) / 2, r.y1), (r.x0, r.y0), (r.x1, r.y0),
-                    (r.x0, r.y1), (r.x1, r.y1)]
-        elif it[0] == "qu":
-            q = it[1]
-            pts += [(q.ul.x, q.ul.y), (q.ur.x, q.ur.y),
-                    (q.ll.x, q.ll.y), (q.lr.x, q.lr.y)]
-        else:
-            pts.append((it[1].x, it[1].y))
-    return pts
-
-
-def _s243_point_choisi(path, a_eviter):
-    """Le point de gomme qui ne touche AUCUNE boîte à préserver ; à défaut le point d'hier, et l'appelant le compte
-    (gommes_sans_abri). Condition : la gomme REMOVE_IF_TOUCHED emporte TOUT tracé touché par son point, pas seulement
-    sa cible. Effet : le point se pose à l'écart des tracés préservés. (voir JOURNAL BACKEND v2.43)"""
-    for (x, y) in _s243_points_candidats(path):
-        r = (x - .3, y - .3, x + .3, y + .3)
-        if not any(_s243_proche(r, b, 0) for b in a_eviter):
-            return (x, y), True
-    return _s243_point_sur_trace(path), False
-
-
-def _s243_proche(a, b, d):
-    return not (a[2] + d < b[0] or b[2] + d < a[0]
-                or a[3] + d < b[1] or b[3] + d < a[1])
-
-
-def _s243_amas(items):
-    groupes = []
-    for r in items:
-        pris = None
-        for g in groupes:
-            if any(_s243_proche(r, x, _S243_COLLE) for x in g):
-                if pris is None:
-                    g.append(r)
-                    pris = g
-                else:
-                    pris.extend(g)
-                    g.clear()
-        if pris is None:
-            groupes.append([r])
-    out = []
-    for g in groupes:
-        if g:
-            out.append((min(r[0] for r in g), min(r[1] for r in g),
-                        max(r[2] for r in g), max(r[3] for r in g)))
-    return out
-
-
-def _s248_etiquette_recuperee(pno, n_amas, fig):
-    """v2.48 : l'étiquette d'un morceau ramassé après la gomme — sa page, son amas, sa marque de mini-page ; jamais celle d'une figure de la page."""
-    return "p%d-g%d-%s" % (int(pno), int(n_amas), fig or "f0")
-
-
-def _s243_symbiose(content, filename, result, api_key):
-    """L'étage entier. Ne lève JAMAIS vers /parse : toute panne rend le
-    résultat d'aujourd'hui avec l'erreur DITE dans `symbiose`."""
-    info = {"tuiles_jouees": 0, "tuiles_non_jugees": 0, "familles_jugees": 0,
-            "textes_juges": 0, "decors_traces": 0, "decors_textes": 0,
-            "recuperees": 0, "jetons_entree": 0, "jetons_sortie": 0}
-    try:
-        images = result.get("images") or []
-        pages_ex = sorted({int(f["page"]) for f in images})
-        if not pages_ex:
-            info["erreur"] = "aucune découpe — étage sans objet"
-            result["symbiose"] = info
-            return result
-        doc = fitz.open(stream=content, filetype="pdf")
-
-        # ── (1) LE MODÈLE VISE — un jugement par famille de jumeaux ──
-        familles_doc = {}          # famille -> bbox représentant (page, bbox)
-        textes_doc = []            # (page, bbox, txt)
-        for pno in pages_ex:
-            traces, textes = _s243_items_de_page(doc[pno - 1])
-            for bb, fam in traces.items():
-                familles_doc.setdefault(fam, (pno, bb))
-            textes_doc += [(pno, bb, t) for bb, t in textes]
-        info["familles_jugees"] = len(familles_doc)
-        info["textes_juges"] = len(textes_doc)
-        elems = [("trace", fam, pno, bb) for fam, (pno, bb) in familles_doc.items()] \
-            + [("texte", None, pno, bb) for pno, bb, _t in textes_doc]
-        verdict_fam, verdict_txt = {}, {}
-        par_page = {}
-        for e in elems:
-            par_page.setdefault(e[2], []).append(e)
-        num = 0
-        for pno, lot_page in sorted(par_page.items()):
-            lot_page.sort(key=lambda e: ((e[3][1] + e[3][3]) / 2, e[3][0]))
-            for i0 in range(0, len(lot_page), _S243_TUILE_MAX):
-                lot = lot_page[i0:i0 + _S243_TUILE_MAX]
-                nums = list(range(num + 1, num + 1 + len(lot)))
-                num += len(lot)
-                png = _s243_tuile_png(doc[pno - 1],
-                                      list(zip(nums, [e[3] for e in lot])))
-                liste_txt = " · ".join(
-                    "T%d (%.0f×%.0f pt)" % (n, e[3][2] - e[3][0], e[3][3] - e[3][1])
-                    for n, e in zip(nums, lot))
-                verdicts, faute, j_in, j_out = _s243_juge_tuile(
-                    api_key, png, liste_txt, nums)
-                info["jetons_entree"] += j_in
-                info["jetons_sortie"] += j_out
-                # v2.43 — UNE reprise par tuile, bornée et dite : une forme cassée se rejoue une fois ; si elle casse
-                # encore, la tuile est NON JUGÉE et DITE. Condition : première passe en faute. Effet : un second appel, jamais plus.
-                if verdicts is None:
-                    verdicts, faute2, j_in2, j_out2 = _s243_juge_tuile(
-                        api_key, png, liste_txt, nums)
-                    info["jetons_entree"] += j_in2
-                    info["jetons_sortie"] += j_out2
-                    info.setdefault("reprises", 0)
-                    info["reprises"] += 1
-                    faute = faute2 if verdicts is None else faute
-                if verdicts is None:
-                    info["tuiles_non_jugees"] += 1
-                    info.setdefault("fautes", []).append(faute)
-                    continue
-                info["tuiles_jouees"] += 1
-                for n, e in zip(nums, lot):
-                    if e[0] == "trace":
-                        verdict_fam[e[1]] = verdicts[n]
-                    else:
-                        verdict_txt[(e[2], e[3])] = verdicts[n]
-
-        # ── (2) LE CODE DÉCIDE — le caviardage des décors ──
-        for pno in pages_ex:
-            page = doc[pno - 1]
-            n_tr = 0
-            dessins = page.get_drawings()
-            a_eviter, cibles = [], []
-            for path in dessins:
-                r = path["rect"]
-                bb = (round(r.x0, 2), round(r.y0, 2), round(r.x1, 2), round(r.y1, 2))
-                if verdict_fam.get(_s243_famille(bb)) == "ne sert pas":
-                    cibles.append(path)
-                else:
-                    a_eviter.append((r.x0 - .3, r.y0 - .3, r.x1 + .3, r.y1 + .3))
-            for path in cibles:
-                (x, y), abri = _s243_point_choisi(path, a_eviter)
-                if not abri:
-                    info["gommes_sans_abri"] = info.get("gommes_sans_abri", 0) + 1
-                page.add_redact_annot(fitz.Rect(x - .3, y - .3, x + .3, y + .3))
-                n_tr += 1
-            if n_tr:
-                page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE,
-                                      graphics=fitz.PDF_REDACT_LINE_ART_REMOVE_IF_TOUCHED,
-                                      text=fitz.PDF_REDACT_TEXT_NONE)
-                # v2.43 — la gomme DÉCLARE ce qu'elle a réellement emporté : attendu = cibles posées ; emporté = tracés
-                # réellement partis.
-                emp = len(dessins) - len(page.get_drawings())
-                info["caviardage_attendu"] = info.get("caviardage_attendu", 0) + n_tr
-                info["caviardage_emporte"] = info.get("caviardage_emporte", 0) + emp
-            info["decors_traces"] += n_tr
-            n_tx = 0
-            for (p2, bb), v in verdict_txt.items():
-                if p2 == pno and v == "ne sert pas":
-                    page.add_redact_annot(fitz.Rect(*bb))
-                    n_tx += 1
-            if n_tx:
-                page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE,
-                                      graphics=fitz.PDF_REDACT_LINE_ART_NONE)
-            info["decors_textes"] += n_tx
-
-        # ── (3) R3 — la seconde passe du serveur sur l'espace libéré ──
-        idx = max((int(f.get("index", -1)) for f in images), default=-1) + 1
-        for pno in pages_ex:
-            page = doc[pno - 1]
-            cadres_p = [[float(v) for v in f["cadre"]]
-                        for f in images if int(f["page"]) == pno]
-            libres = []
-            traces, textes = _s243_items_de_page(page)
-            for b in page.get_text("dict")["blocks"]:
-                if b["type"] == 1:
-                    traces[tuple(b["bbox"])] = None
-            for bb in list(traces.keys()) + [t[0] for t in textes]:
-                cx, cy = (bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2
-                if not any(c[0] <= cx <= c[2] and c[1] <= cy <= c[3]
-                           for c in cadres_p):
-                    libres.append(bb)
-            for _n_amas, env in enumerate(_s243_amas(libres)):
-                if (env[2] - env[0]) < _S243_MIN_COTE or \
-                   (env[3] - env[1]) < _S243_MIN_COTE or \
-                   (env[2] - env[0]) * (env[3] - env[1]) < _S243_MIN_AIRE:
-                    continue
-                m = 6.0
-                reg = (max(0, env[0] - m), max(0, env[1] - m),
-                       min(page.rect.width, env[2] + m),
-                       min(page.rect.height, env[3] + m))
-                w, h = reg[2] - reg[0], reg[3] - reg[1]
-                if w < 8 or h < 8:
-                    continue
-                d2 = fitz.open()
-                p3 = d2.new_page(width=w, height=h)
-                p3.show_pdf_page(fitz.Rect(0, 0, w, h), doc, pno - 1,
-                                 clip=fitz.Rect(*reg))
-                sous = parse_pdf(d2.tobytes(), filename, corrige_pages=set())   # v2.52 : une découpe n'est pas une page à juger
-                d2.close()
-                for f in (sous.get("images") or []):
-                    c = [float(v) for v in f["cadre"]]
-                    f["cadre"] = [c[0] + reg[0], c[1] + reg[1],
-                                  c[2] + reg[0], c[3] + reg[1]]
-                    f["page"] = pno
-                    f["index"] = idx
-                    f["symbiose_recuperee"] = True
-                    # v2.48 — sa propre étiquette : un morceau ramassé après la gomme n'est jamais de la même figure qu'un morceau de la vraie page
-                    f["figure"] = _s248_etiquette_recuperee(pno, _n_amas, f.get("figure"))
-                    if f.get("entier_cadre"):
-                        _ec = [float(v) for v in f["entier_cadre"]]
-                        f["entier_cadre"] = [_ec[0] + reg[0], _ec[1] + reg[1], _ec[2] + reg[0], _ec[3] + reg[1]]
-                    idx += 1
-                    images.append(f)
-                    info["recuperees"] += 1
-        doc.close()
-        result["images"] = images
-        result["num_images"] = len(images)
-        result["symbiose"] = info
-        return result
-    except Exception as e:
-        info["erreur"] = "étage en panne — parse d'aujourd'hui rendu : %s" % e
-        result["symbiose"] = info
-        return result
-
-
 @app.post("/parse")
-def parse_document(file: UploadFile = File(...),
-                         api_key: str = Form(None)):
+async def parse_document(file: UploadFile = File(...)):
     """
     Reçoit un PDF, un DOCX, ou tout format bureautique lisible par LibreOffice
     (odt, doc, rtf…).
@@ -3140,7 +2121,7 @@ def parse_document(file: UploadFile = File(...),
     type d'exercice détecté, et positions relatives.
     ODT : converti en PDF (LibreOffice) puis traité par le pipeline PDF.
     """
-    content = file.file.read()
+    content = await file.read()
     filename = file.filename or "document"
     ext = filename.rsplit(".", 1)[-1].lower()
 
@@ -3151,10 +2132,16 @@ def parse_document(file: UploadFile = File(...),
             raise HTTPException(
                 422, f"Conversion {ext.upper()}→PDF échouée (LibreOffice) : {conv_err}. "
                      "Enregistrez le document en PDF et réessayez.")
-        result = parse_pdf(pdf_bytes, filename, api_key=api_key)
+        result = parse_pdf(pdf_bytes, filename)
         result["source_format"] = ext
-        # Joindre le PDF converti pour qu'il soit transmis à l'IA comme document natif. V2.9.3 : le plafond est PDF_B64_MAX,
-        # le même que celui de la page ; au-delà, la réponse porte « pdf_b64_skipped_bytes » — rien n'est écarté en silence.
+        # Joindre le PDF converti pour qu'il soit transmis à l'IA comme document
+        # natif. V2.9.3 : le plafond passe de 150 000 à 4 000 000 caractères
+        # base64 (~3 Mo de PDF), aligné sur PDF_B64_MAX du frontend v10.62.
+        # L'ancienne valeur écartait SILENCIEUSEMENT les documents illustrés
+        # (EvalSerie1maths6P : 1 474 ko, 1 341 % du plafond) : le modèle ne
+        # recevait alors que le texte et les miniatures, sans jamais voir la page.
+        # Les deux plafonds doivent rester égaux : c'est le frontend qui décide,
+        # le backend ne doit plus filtrer en amont sans le dire.
         if len(pdf_bytes) * 4 / 3 < PDF_B64_MAX:
             result["pdf_b64"] = base64.b64encode(pdf_bytes).decode()
         else:
@@ -3162,13 +2149,8 @@ def parse_document(file: UploadFile = File(...),
         return result
 
     # PDF : extraction directe PyMuPDF (images raster + figures vectorielles)
-    # v2.43 — avec une clé, l'étage de la symbiose (décors jugés puis gommés, découpes récupérées ajoutées au tableau) ;
-    # sans clé, rien ne change. (voir JOURNAL BACKEND v2.43)
     if ext == "pdf":
-        result = parse_pdf(content, filename, api_key=api_key)
-        if api_key:
-            result = _s243_symbiose(content, filename, result, api_key)
-        return result
+        return parse_pdf(content, filename)
 
     # Parser le DOCX
     try:
@@ -4118,16 +3100,21 @@ async def generate(request: Request):
     messages = body.get("messages", [])
     max_tokens = body.get("max_tokens", 6000)
 
-    # V2.41 — condition : la bibliothèque refuse une génération non-streaming
-    # au-delà de ~21 333 jetons quand l'attente est celle par défaut ; effet :
-    # l'attente est DÉCLARÉE (3600 s), la porte ne joue plus et le plafond de
-    # 32 000 de la page reste servi. Pourquoi : JOURNAL_BACKEND_v2_41.md.
-    client = anthropic.Anthropic(api_key=api_key, timeout=3600.0)
+    client = anthropic.Anthropic(api_key=api_key)
 
-    # ══ v2.13 — LE CACHE SURVIT À LA DURÉE D'UNE PARTIE ═══
-    # Durée longue (1 h) demandée sur chaque repère, avec REPLI AUTOMATIQUE en durée courte si le serveur refuse la syntaxe
-    # (la réponse dit la durée réellement servie) ; un repère posé sur le dernier bloc du premier message utilisateur, là
-    # où vit le document ; la réponse renvoie TOUS les compteurs (lus / relus / mis en cache). (voir JOURNAL BACKEND v2.13)
+    # ══ v2.13 — LE CACHE SURVIT À LA DURÉE D'UNE PARTIE ═══════════════════════════════════
+    # Constat des tirages (pied de page essai_10138) : « 10 009 lus + 0 relus +
+    # 160 006 mis en cache » — on PAYE la mise en cache à chaque partie et on ne relit
+    # JAMAIS. Deux causes dans le code v2.12 :
+    #   1. le cache éphémère vit 5 minutes, or l'écriture d'une partie par le modèle en
+    #      prend davantage : à la partie suivante, le cache est déjà mort ;
+    #   2. seul le prompt système portait un repère de cache — le DOCUMENT (le gros du
+    #      volume), envoyé dans le premier message, n'en portait aucun.
+    # Remèdes : durée longue (1 h) demandée sur chaque repère, avec REPLI AUTOMATIQUE en
+    # durée courte si le serveur refuse la syntaxe (aucune génération ne casse, la réponse
+    # dit la durée réellement servie) ; et un repère posé sur le dernier bloc du premier
+    # message utilisateur, là où vit le document. La réponse renvoie désormais TOUS les
+    # compteurs (lus / relus / mis en cache) : la facturation exige des coûts prouvables.
     for m in messages:
         if m.get("role") == "user":
             c = m.get("content")
@@ -4454,12 +3441,6 @@ def health():
     # DANS le fichier déployé, jamais recopiée à la main : c'est ce qui
     # permet de savoir, en ligne, laquelle tourne vraiment.
     return {"status": "ok", "version": VERSION, "empreinte": EMPREINTE, "lecteur_pdf": LECTEUR_PDF,
-            # v2.44 — change à CHAQUE démarrage du processus : c'est ce qui permet
-            # à la page de savoir que sa demande est morte avec l'ancien serveur.
-            "instance": DEMARRAGE,
-            # v2.44 — information seulement : change au REMPLACEMENT de l'instance,
-            # pas au redémarrage du processus. Ne juge rien.
-            "instance_hebergeur": INSTANCE_HEBERGEUR,
             "grilles": (getattr(_grilles, "VERSION", "inconnue")
                         if GRILLES_ACTIVES else "absent"),
             "formes": (getattr(_formes, "VERSION", "inconnue")
