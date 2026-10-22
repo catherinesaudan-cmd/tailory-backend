@@ -25,18 +25,13 @@ import tempfile
 import subprocess
 from typing import Optional
 
-# python-docx
-from docx import Document as DocxDocument
-from docx.oxml.ns import qn
-from docx.oxml import OxmlElement
-
 # V2.9.3 — plafond d'attachement d'un PDF, en caractères base64 : le même que celui de la page (PDF_B64_MAX). Gardé (DEC-3262, une sûreté qui ne coûte rien) ;
 # aucune route du serveur ne l'emploie plus depuis le retrait de la route Word (8.6, DEC-1249).
 PDF_B64_MAX = 4_000_000  # ~3 Mo de PDF, une trentaine de pages illustrées
 
 # Seule déclaration du numéro de version du serveur : /health la lit ; elle n'est recopiée nulle part (voir JOURNAL BACKEND v2.23).
 # Ce fichier ne porte que ce qu'il fait ; le pourquoi et les mesures de chaque version sont au JOURNAL BACKEND.
-VERSION = "2.78"
+VERSION = "2.79"
 
 # ═══ v2.34 — C11 : UN CADRE SANS DESSIN N'EST PAS UNE FIGURE ═══
 # Condition : dans le cadre découpé, aucun objet dessiné. Effet : le cadre n'est pas transmis au modèle.
