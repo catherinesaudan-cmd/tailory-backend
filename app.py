@@ -36,7 +36,7 @@ PDF_B64_MAX = 4_000_000  # ~3 Mo de PDF, une trentaine de pages illustrées
 
 # Seule déclaration du numéro de version du serveur : /health la lit ; elle n'est recopiée nulle part (voir JOURNAL BACKEND v2.23).
 # Ce fichier ne porte que ce qu'il fait ; le pourquoi et les mesures de chaque version sont au JOURNAL BACKEND.
-VERSION = "2.73"
+VERSION = "2.78"
 
 # ═══ v2.34 — C11 : UN CADRE SANS DESSIN N'EST PAS UNE FIGURE ═══
 # Condition : dans le cadre découpé, aucun objet dessiné. Effet : le cadre n'est pas transmis au modèle.
@@ -2837,6 +2837,374 @@ def _v254_decor_region(page, R, shape, repli):
     # v2.60 — le trait du décor n'est gardé que là où la page est le décor redessiné, à 30 près
     return _v260_la_ou_il_se_voit(page, R, out)
 
+# ═══ v2.76 — R2c (S122, DEC-3362 rang 2) : UN ENCADRÉ DE TEXTE N'EST PAS UNE FIGURE ═══
+# Condition : un dessin ORPHELIN (qui n'appartient à aucun tableau) dont un rectangle a son centre dans un cadre de texte noir de la source, agrandi de 3 pt.
+# Le cadre est relevé dans la source (un cadre fermé tracé, isolé, sans image, aplat, courbe, case ni trait vertical), de classe « TC » (>= 4 mots et au moins un
+# blanc à compléter) ou « T » (texte seul, >= 2 lignes, >= 6 mots), tous ses caractères étant noirs (aucune composante RVB au-dessus de 60/255). Deux relevés, réunis :
+# coins arrondis jusqu'à 30 pt (avec courbes de coin) et jusqu'à 10 pt (sans courbe).
+# Effet : ce rectangle est ôté du dessin (avec son encre du masque du dessin), et un dessin sans rectangle est ôté. Le texte du cadre n'est plus posé en image : il reste du texte.
+# C'est une déclaration de structure lue dans la source, ni liste de mots ni nom de document. Le filtre s'applique au résultat de _v254_dessins_page, donc aussi quand la gomme
+# rejoue parse_pdf. Ce que la fonction lit : page.get_drawings(), page.get_text("words" et "dict"), page.get_image_info(). Code porté du banc (A217_273, i1b/i1/i7b, forme R2c).
+
+_R2C_TOL = 0.8            # tolérance d'alignement d'un trait (pt)
+_R2C_TOL_CAD = 2.5        # tolérance de fermeture d'un cadre (pt)
+_R2C_MIN_L, _R2C_MIN_H = 36.0, 14.0     # taille minimale d'un cadre (pt)
+_R2C_MAX_AIRE = 0.85      # un cadre qui couvre plus de 85 % de la page n'est pas un encadré
+_R2C_EPAIS_TRAIT = 1.5    # un fin rectangle plein plus mince que ça est un trait
+_R2C_BLANC_MIN = 8.0      # un trait horizontal fin de 8 pt ou plus, dans le cadre, est un blanc à remplir
+_R2C_SEUIL_MM = 2.84      # 1 mm en points : une couleur plus large que ça est un aplat
+_R2C_PLAFOND_TRACES = 20000   # au-delà, la page n'est pas jouée
+_R2C_MOTS_TC, _R2C_MOTS_T, _R2C_LIGNES_T = 4, 6, 2
+
+_R2C_RE_BLANC = re.compile(r"_{2,}|\.{3,}|…")
+_R2C_RE_MOT = re.compile(r"[^\W_]", re.U)   # un caractère qui n'est ni espace, ni ponctuation, ni « _ »
+
+
+def _r2c_proche(a, b, t=_R2C_TOL):
+    return abs(a - b) <= t
+
+
+def _r2c_couleur_blanche(c):
+    return c is None or all(float(v) >= 0.97 for v in c)
+
+
+def _r2c_couleur_noire(c):
+    return c is not None and all(float(v) <= 0.03 for v in c)
+
+
+def _r2c_segments_item(it):
+    """segments axe-alignés d'un item de tracé : liste de ('h', y, x0, x1) ou ('v', x, y0, y1)."""
+    out = []
+    k = it[0]
+    pts = []
+    if k == 'l':
+        pts = [(it[1].x, it[1].y, it[2].x, it[2].y)]
+    elif k == 're':
+        r = it[1]
+        pts = [(r.x0, r.y0, r.x1, r.y0), (r.x1, r.y0, r.x1, r.y1), (r.x1, r.y1, r.x0, r.y1), (r.x0, r.y1, r.x0, r.y0)]
+    elif k == 'qu':
+        q = it[1]
+        P = [q.ul, q.ur, q.lr, q.ll]
+        pts = [(P[i].x, P[i].y, P[(i + 1) % 4].x, P[(i + 1) % 4].y) for i in range(4)]
+    for (xa, ya, xb, yb) in pts:
+        if _r2c_proche(ya, yb) and abs(xa - xb) >= 1.0:
+            out.append(('h', (ya + yb) / 2, min(xa, xb), max(xa, xb)))
+        elif _r2c_proche(xa, xb) and abs(ya - yb) >= 1.0:
+            out.append(('v', (xa + xb) / 2, min(ya, yb), max(ya, yb)))
+    return out
+
+
+def _r2c_fusionner(segs):
+    """fusionne les segments colinéaires qui se touchent (trou <= 1.5 pt)."""
+    par = {}
+    for s in segs:
+        par.setdefault(s[0], []).append(s)
+    res = []
+    for sens, L in par.items():
+        L = sorted(L, key=lambda s: (round(s[1] / _R2C_TOL), s[2]))
+        cur = None
+        for s in L:
+            if cur and _r2c_proche(cur[1], s[1]) and s[2] <= cur[3] + 1.5:
+                cur = (sens, cur[1], cur[2], max(cur[3], s[3]))
+            else:
+                if cur:
+                    res.append(cur)
+                cur = s
+        if cur:
+            res.append(cur)
+    return res
+
+
+def _r2c_cadres_d_un_trace(d, CT, courbes):
+    """P1 — un seul tracé dont tous les items sont des traits axe-alignés posés sur les 4 bords de sa boîte (tirets compris)."""
+    r = fitz.Rect(d['rect'])
+    if r.width < _R2C_MIN_L or r.height < _R2C_MIN_H:
+        return None
+    if d.get('type') not in ('s', 'fs'):
+        return None
+    items = d['items']
+    if len(items) < 1 or any(it[0] not in (('l', 're', 'qu', 'c') if courbes else ('l', 're', 'qu')) for it in items):
+        return None
+    cov = {'t': 0.0, 'b': 0.0, 'l': 0.0, 'r': 0.0}
+    hors = 0
+    for it in items:
+        if it[0] == 'c':
+            pts = [it[1], it[2], it[3], it[4]]
+            cx0 = min(p.x for p in pts); cx1 = max(p.x for p in pts); cy0 = min(p.y for p in pts); cy1 = max(p.y for p in pts)
+            if (cx1 - cx0) <= CT + 1 and (cy1 - cy0) <= CT + 1 and (cx0 <= r.x0 + CT + 1 or cx1 >= r.x1 - CT - 1) and (cy0 <= r.y0 + CT + 1 or cy1 >= r.y1 - CT - 1):
+                continue
+            return None
+        for s in _r2c_segments_item(it):
+            if s[0] == 'h':
+                if _r2c_proche(s[1], r.y0, 1.0):
+                    cov['t'] += s[3] - s[2]
+                elif _r2c_proche(s[1], r.y1, 1.0):
+                    cov['b'] += s[3] - s[2]
+                else:
+                    hors += 1
+            else:
+                if _r2c_proche(s[1], r.x0, 1.0):
+                    cov['l'] += s[3] - s[2]
+                elif _r2c_proche(s[1], r.x1, 1.0):
+                    cov['r'] += s[3] - s[2]
+                else:
+                    hors += 1
+    if hors:
+        return None
+    if cov['t'] >= 0.5 * r.width and cov['b'] >= 0.5 * r.width and cov['l'] >= 0.5 * r.height and cov['r'] >= 0.5 * r.height:
+        return r
+    return None
+
+
+def _r2c_cadres_assembles(hs, vs, CT):
+    """P2 — côtés assemblés : deux verticaux et deux horizontaux qui ferment un rectangle (coins arrondis tolérés)."""
+    res = []
+    for i, v1 in enumerate(vs):
+        for v2 in vs[i + 1:]:
+            a, b = (v1, v2) if v1[1] <= v2[1] else (v2, v1)
+            if b[1] - a[1] < _R2C_MIN_L:
+                continue
+            if not (_r2c_proche(a[2], b[2], _R2C_TOL_CAD) and _r2c_proche(a[3], b[3], _R2C_TOL_CAD)):
+                continue
+            y0, y1 = a[2], a[3]
+            if y1 - y0 < _R2C_MIN_H - 2 * CT or y1 - y0 < 4:
+                continue
+            xa, xb = a[1], b[1]
+            top = [h for h in hs if (y0 - CT - 0.01 <= h[1] <= y0 + _R2C_TOL_CAD)
+                   and h[2] <= xa + CT + _R2C_TOL_CAD and h[3] >= xb - CT - _R2C_TOL_CAD
+                   and h[2] >= xa - _R2C_TOL_CAD and h[3] <= xb + _R2C_TOL_CAD]
+            bot = [h for h in hs if (y1 - _R2C_TOL_CAD <= h[1] <= y1 + CT + 0.01)
+                   and h[2] <= xa + CT + _R2C_TOL_CAD and h[3] >= xb - CT - _R2C_TOL_CAD
+                   and h[2] >= xa - _R2C_TOL_CAD and h[3] <= xb + _R2C_TOL_CAD]
+            if not top or not bot:
+                continue
+            ht = min(top, key=lambda h: abs(h[1] - y0))
+            hb = min(bot, key=lambda h: abs(h[1] - y1))
+            R = fitz.Rect(xa, ht[1], xb, hb[1])
+            if R.width >= _R2C_MIN_L and R.height >= _R2C_MIN_H:
+                res.append(R)
+    return res
+
+
+def _r2c_partagent_un_cote(A, B):
+    """A et B (rects) partagent un côté : même ligne (1.5 pt) et recouvrement d'au moins la moitié du plus court."""
+    def rec(a0, a1, b0, b1):
+        return min(a1, b1) - max(a0, b0)
+    for ya, yb in ((A.y0, B.y0), (A.y0, B.y1), (A.y1, B.y0), (A.y1, B.y1)):
+        if _r2c_proche(ya, yb, 1.5) and rec(A.x0, A.x1, B.x0, B.x1) >= 0.5 * min(A.width, B.width):
+            return True
+    for xa, xb in ((A.x0, B.x0), (A.x0, B.x1), (A.x1, B.x0), (A.x1, B.x1)):
+        if _r2c_proche(xa, xb, 1.5) and rec(A.y0, A.y1, B.y0, B.y1) >= 0.5 * min(A.height, B.height):
+            return True
+    return False
+
+
+def _r2c_relever_page(page, doc_nom, CT, courbes):
+    """rend (lignes, joue, raison_non_joue). lignes : une par cadre."""
+    ds = page.get_drawings()
+    if len(ds) > _R2C_PLAFOND_TRACES:
+        return [], False, "trop de tracés (%d)" % len(ds)
+    pr = page.rect
+    aire_page = pr.width * pr.height
+    segs = []
+    p1 = []
+    fonds = []   # (rect, fill) des remplissages non minces
+    for d in ds:
+        typ = d.get('type')
+        r = fitz.Rect(d['rect'])
+        cadre1 = _r2c_cadres_d_un_trace(d, CT, courbes)
+        if cadre1 is not None:
+            p1.append(cadre1)
+        if typ in ('s', 'fs'):
+            for it in d['items']:
+                segs += _r2c_segments_item(it)
+        if typ in ('f', 'fs') and d.get('fill') is not None:
+            # un fin rectangle plein est un trait (bordure Word)
+            if min(r.width, r.height) <= _R2C_EPAIS_TRAIT and max(r.width, r.height) >= 6:
+                if r.width >= r.height:
+                    segs.append(('h', (r.y0 + r.y1) / 2, r.x0, r.x1))
+                else:
+                    segs.append(('v', (r.x0 + r.x1) / 2, r.y0, r.y1))
+            else:
+                fonds.append((r, d['fill']))
+    segs = _r2c_fusionner(segs)
+    hs = [s for s in segs if s[0] == 'h']
+    vs = [s for s in segs if s[0] == 'v']
+    if len(hs) > 400 or len(vs) > 400:
+        return [], False, "trop de côtés (%d h, %d v)" % (len(hs), len(vs))
+    cadres = [(r, 'P1') for r in p1] + [(r, 'P2') for r in _r2c_cadres_assembles(hs, vs, CT)]
+    # dédoublonner en gardant le premier
+    uniques = []
+    for r, src in cadres:
+        if r.width * r.height > _R2C_MAX_AIRE * aire_page:
+            continue
+        if not any(_r2c_proche(r.x0, o.x0, 1.5) and _r2c_proche(r.y0, o.y0, 1.5) and _r2c_proche(r.x1, o.x1, 1.5) and _r2c_proche(r.y1, o.y1, 1.5) for o, _ in uniques):
+            uniques.append((r, src))
+    rects = [r for r, _ in uniques]
+    # mots, images
+    mots = page.get_text('words')
+    try:
+        imgs = [fitz.Rect(i['bbox']) for i in page.get_image_info()]
+    except Exception:
+        imgs = []
+    lignes = []
+    for idx, (R, src) in enumerate(uniques):
+        raison = None
+        # englobe un autre cadre / partage un côté (cellule de grille)
+        englobe = any(j != idx and R.contains(rects[j]) and not (_r2c_proche(R.x0, rects[j].x0, 1.5) and _r2c_proche(R.x1, rects[j].x1, 1.5) and _r2c_proche(R.y0, rects[j].y0, 1.5) and _r2c_proche(R.y1, rects[j].y1, 1.5)) and rects[j].width * rects[j].height >= 0.02 * R.width * R.height for j in range(len(rects)))
+        partage = any(j != idx and _r2c_partagent_un_cote(R, rects[j]) and not rects[j].contains(R) and not R.contains(rects[j]) for j in range(len(rects)))
+        inter = fitz.Rect(R.x0 + 1.0, R.y0 + 1.0, R.x1 - 1.0, R.y1 - 1.0)
+        m_dans = [w for w in mots if inter.contains(fitz.Point((w[0] + w[2]) / 2, (w[1] + w[3]) / 2))]
+        n_mots = sum(1 for w in m_dans if _R2C_RE_MOT.search(w[4]))
+        n_lignes = len(set((w[5], w[6]) for w in m_dans if _R2C_RE_MOT.search(w[4])))
+        blancs = sum(1 for w in m_dans if _R2C_RE_BLANC.search(w[4]))
+        trouve = {'image': 0, 'couleur': 0, 'forme': 0, 'trait': 0}
+        # images
+        for im in imgs:
+            if inter.contains(fitz.Point((im.x0 + im.x1) / 2, (im.y0 + im.y1) / 2)):
+                trouve['image'] += 1
+        # fond du cadre : un remplissage non blanc qui couvre >= 80 % du cadre
+        for (fr, fill) in fonds:
+            if not _r2c_couleur_blanche(fill) and (fr & R).get_area() >= 0.8 * R.get_area() and fr.get_area() <= 1.1 * R.get_area() + 40:
+                trouve['couleur'] += 1
+        # tracés à l'intérieur (hors les côtés du cadre)
+        for d in ds:
+            r = fitz.Rect(d['rect'])
+            if r.is_empty and not (r.width >= 0 and r.height >= 0):
+                continue
+            if not inter.contains(fitz.Point((r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2)):
+                continue
+            w_, h_ = r.width, r.height
+            # un trait fin (cloison, ou trait de réponse) peut toucher les bords du cadre : seul son milieu doit être dedans
+            fin_h = (h_ <= _R2C_EPAIS_TRAIT and w_ >= _R2C_BLANC_MIN and R.x0 - 2 <= r.x0 and r.x1 <= R.x1 + 2)
+            fin_v = (w_ <= _R2C_EPAIS_TRAIT and h_ >= _R2C_BLANC_MIN and R.y0 - 2 <= r.y0 and r.y1 <= R.y1 + 2
+                     and inter.x0 + 2 <= (r.x0 + r.x1) / 2 <= inter.x1 - 2)
+            if not (fin_h or fin_v):
+                if not (inter.x0 - 0.5 <= r.x0 and r.x1 <= inter.x1 + 0.5 and inter.y0 - 0.5 <= r.y0 and r.y1 <= inter.y1 + 0.5):
+                    continue
+            fill = d.get('fill')
+            a_courbe = any(it[0] == 'c' for it in d['items'])
+            if d.get('type') in ('f', 'fs') and fill is not None and min(w_, h_) > _R2C_SEUIL_MM:
+                if _r2c_couleur_blanche(fill):
+                    pass
+                elif _r2c_couleur_noire(fill):
+                    trouve['forme'] += 1
+                else:
+                    trouve['couleur'] += 1
+                continue
+            if a_courbe and w_ >= 3 and h_ >= 3:
+                trouve['forme'] += 1
+                continue
+            if h_ <= _R2C_EPAIS_TRAIT and w_ >= _R2C_BLANC_MIN:
+                if w_ >= 0.95 * R.width:
+                    trouve['forme'] += 1      # une cloison qui traverse tout le cadre : deux cases, pas un blanc
+                    continue
+                # un soulignement (le trait est juste sous un mot, sur plus de 60 % de sa largeur) n'est pas un blanc
+                rec_tot = 0.0
+                for w in m_dans:
+                    if -4.0 <= (r.y0 + r.y1) / 2 - w[3] <= 1.5:
+                        rec_tot += max(0.0, min(r.x1, w[2]) - max(r.x0, w[0]))
+                sous = rec_tot >= 0.6 * w_
+                if not sous:
+                    trouve['trait'] += 1
+                continue
+            if w_ <= _R2C_EPAIS_TRAIT and h_ >= _R2C_BLANC_MIN:
+                trouve['forme'] += 1
+                continue
+            if w_ >= 3 and h_ >= 3:
+                trouve['forme'] += 1
+        blancs_tot = blancs + trouve['trait']
+        if englobe:
+            raison = 'englobe'
+        elif partage:
+            raison = 'grille'
+        elif trouve['image']:
+            raison = 'image'
+        elif trouve['couleur']:
+            raison = 'couleur'
+        elif trouve['forme']:
+            raison = 'forme'
+        classe = None
+        if raison is None:
+            if n_mots >= _R2C_MOTS_TC and blancs_tot >= 1:
+                classe = 'TC'
+            elif n_mots >= _R2C_MOTS_T and n_lignes >= _R2C_LIGNES_T and blancs_tot == 0:
+                classe = 'T'
+            else:
+                raison = 'trop court'
+        lignes.append(dict(doc=doc_nom, page=page.number + 1, rect=[round(R.x0, 1), round(R.y0, 1), round(R.x1, 1), round(R.y1, 1)],
+                           source=src, mots=n_mots, lignes=n_lignes, blancs=blancs_tot, classe=classe, exclusion=raison,
+                           trouve=trouve))
+    return lignes, True, None
+
+
+def _r2c_spans_noirs(page, R):
+    inter = fitz.Rect(R.x0 + 1, R.y0 + 1, R.x1 - 1, R.y1 - 1)
+    vu = 0
+    for b in page.get_text('dict')['blocks']:
+        if b['type'] != 0:
+            continue
+        for l in b['lines']:
+            for s in l['spans']:
+                bb = fitz.Rect(s['bbox'])
+                if not s['text'].strip() or not inter.contains(fitz.Point((bb.x0 + bb.x1) / 2, (bb.y0 + bb.y1) / 2)):
+                    continue
+                vu += 1
+                c = s['color']
+                if max((c >> 16) & 255, (c >> 8) & 255, c & 255) > 60:
+                    return False
+    return vu > 0
+
+
+def _r2c_cadres_du_perimetre(page):
+    lignes = []
+    for ct, courbes in ((30.0, True), (10.0, False)):
+        try:
+            l_, ok, _ = _r2c_relever_page(page, 'x', ct, courbes)
+        except Exception:
+            l_ = []
+        lignes += l_
+    out = []
+    for c in lignes:
+        if c['classe'] in ('TC', 'T'):
+            R = fitz.Rect(c['rect'])
+            if _r2c_spans_noirs(page, R):
+                out.append(fitz.Rect(R.x0 - 3, R.y0 - 3, R.x1 + 3, R.y1 + 3))
+    return out
+
+
+def _r2c_centre(r):
+    K = _V247_K
+    return fitz.Point((r[0] + r[2]) / 2 / K, (r[1] + r[3]) / 2 / K)
+
+
+def _r2c_filtrer(page, out):
+    cadres = _r2c_cadres_du_perimetre(page)
+    if cadres:
+        garde = []
+        for dd in out:
+            if not dd.get('orphelin'):
+                garde.append(dd)
+                continue
+            nr = []
+            for r in dd['rects']:
+                c = _r2c_centre(r)
+                if any(f.contains(c) for f in cadres):
+                    if 'own' in dd:
+                        bx0, by0, A = dd['own']
+                        ya, yb = max(0, int(r[1]) - by0), max(0, int(r[3]) - by0)
+                        xa, xb = max(0, int(r[0]) - bx0), max(0, int(r[2]) - bx0)
+                        A = A.copy(); A[ya:yb, xa:xb] = False
+                        dd = dict(dd); dd['own'] = (bx0, by0, A)
+                else:
+                    nr.append(r)
+            if nr:
+                dd = dict(dd); dd['rects'] = nr
+                garde.append(dd)
+        out = garde
+    return out
+
+
 def _v254_dessins_page(page, fenetres, etats, mots, L, texte, attribution, decor):
     """Les dessins de la page. Un dessin : les taches des fenêtres (9 px au moins) qui partagent un pixel ou sont à 3 px ou
     moins ; un tableau : les dessins et l'encre libre dont la moitié au moins est dans son rectangle ; l'encre libre (hors
@@ -3129,7 +3497,7 @@ def _v254_rectangles(page, k, st, fenetres, etats, mots, L, texte, attribution, 
         R1.clear(); R1.update(doc=page.parent, cle={}, pages={})
     pno = page.number + 1
     if pno not in R1["pages"]:
-        R1["pages"][pno] = _v254_dessins_page(page, fenetres, etats, mots, L, texte, attribution, decor)
+        R1["pages"][pno] = _r2c_filtrer(page, _v254_dessins_page(page, fenetres, etats, mots, L, texte, attribution, decor))
     R = st["R"]; ox, oy = R.x0 * K, R.y0 * K
     cle = R1["cle"]; rects = []
     for dd in R1["pages"][pno]:
@@ -3239,7 +3607,17 @@ def _v254_image_numerotee(page, F):
     for k, m in enumerate(F):
         c = m["boite"]; rr = fitz.Rect(c[0] * g - 1, c[1] * g - 1, c[2] * g + 1, c[3] * g + 1)
         q.draw_rect(rr, color=(1, 0.45, 0), width=1.0)
-        q.insert_text((rr.x0 + 1, max(10, rr.y0 - 2)), "P%d" % (k + 1), fontsize=9, color=(0.85, 0.1, 0))
+    places = []  # RL (DEC-3362, rang 3) : chaque numéro sur fond blanc, à la première place libre
+    for k, m in enumerate(F):
+        c = m["boite"]; rr = fitz.Rect(c[0] * g - 1, c[1] * g - 1, c[2] * g + 1, c[3] * g + 1)
+        t = "P%d" % (k + 1); w = fitz.get_text_length(t, fontsize=10) + 3; h = 11
+        for x, y in ((rr.x0, rr.y0 - h - 1), (rr.x1 - w, rr.y0 - h - 1), (rr.x0, rr.y1 + 1), (rr.x1 - w, rr.y1 + 1), (rr.x0 + 1, rr.y0 + 1)):
+            R = fitz.Rect(x, y, x + w, y + h)
+            if q.rect.contains(R) and not any(R.intersects(p) for p in places):
+                break
+        places.append(R)
+        q.draw_rect(R, color=None, fill=(1, 1, 1))
+        q.insert_text((R.x0 + 1.5, R.y1 - 2), t, fontsize=10, color=(0.85, 0.1, 0))
     png = q.get_pixmap(matrix=fitz.Matrix(1, 1)).tobytes("png")
     o.close()
     return png
@@ -4184,7 +4562,7 @@ def _vb_mesure_c(doc, images, corrige_pages, borne=6.0):
                 continue
             k = [e for e in el if e[0] == "K"]; t1 = [e for e in el if e[0] == "P1"]; t3 = [e for e in el if e[0] == "P3"]
             t2 = [e for e in mots if _vb_p2(e[2]) >= 4]
-            if not (k or t1 or t2 or t3):
+            if borne is None and not (k or t1 or t2 or t3):  # RP1 (DEC-3362, rang 2) : la part B (borne 6 mm) ne demande plus de trou
                 continue
             R = L["rect"]
             d_ex, i_ex = _vb_proche(R, ex)
@@ -4735,7 +5113,42 @@ def _v267_cache_encre(page, bb):
     return out
 
 
+_R7_SUITE_EM = 1.5  # R7 (rang 7, « (e) » de la 121) : écart au plus entre deux mots de la même ligne pour qu'ils se tiennent bout à bout (en corps) ; fixé avant les mesures
+
+
+def _r7_suite(bb, texte, tous):
+    """R7 — la « suite » d'un mot cursif listé : les mots du texte de la page qui se tiennent bout à bout sur sa ligne (écart d'un mot au suivant <= _R7_SUITE_EM corps, même
+    ligne), le mot compris, écrits séparés par une espace ; None si la suite n'a qu'un mot. C'est ce que la page compare au texte que le modèle a écrit pour ne pas reposer deux
+    fois une phrase (champ `lt` de l'entrée cursive, que la page ne lisait que pour les lignes). Un signe dessiné (« ⊥ ») n'est pas un mot : il peut rester entre deux mots."""
+    W = next((w for w in tous if w["texte"] == texte and all(abs(x - y) < 0.2 for x, y in zip(w["bbox"], bb))), None)
+    if W is None:
+        return None
+    r = fitz.Rect(W["bbox"]); t = W["taille"]; L = []
+    for v in tous:
+        if v is W or not v["horizontal"]:
+            continue
+        q = fitz.Rect(v["bbox"])
+        if min(r.y1, q.y1) - max(r.y0, q.y0) < _V267_RECOUV * min(r.height, q.height):
+            continue
+        L.append(v)
+    g = []; x = r.x0
+    for v in sorted([v for v in L if v["bbox"][2] <= r.x0 + _V267_BORD_PT], key=lambda v: -v["bbox"][2]):
+        if x - v["bbox"][2] <= _R7_SUITE_EM * t:
+            g.append(v["texte"]); x = v["bbox"][0]
+        else:
+            break
+    d = []; x = r.x1
+    for v in sorted([v for v in L if v["bbox"][0] >= r.x1 - _V267_BORD_PT], key=lambda v: v["bbox"][0]):
+        if v["bbox"][0] - x <= _R7_SUITE_EM * t:
+            d.append(v["texte"]); x = v["bbox"][2]
+        else:
+            break
+    mots = list(reversed(g)) + [W["texte"]] + d
+    return " ".join(mots) if len(mots) >= 2 else None
+
+
 def _v267_ajoute_d6(doc, images, cur, vb):
+
     """Les mots cursifs de D6 (voie b : dans une image de la famille qui n'est pas une légende ; voie a : isolé, non ponctué, à 6 mm de la
     famille ; a(iii) : sa figure la plus proche est une légende, il va à l'image de la famille à 6 mm d'elle), hors lignage, copies
     superposées réunies, chacun avec son cache ; ajoutés à voisins_b (le cache seul s'ajoute à une entrée qui est le même mot)."""
@@ -4761,7 +5174,7 @@ def _v267_ajoute_d6(doc, images, cur, vb):
             d, r, f, c = min(fam, key=lambda t: t[0])
             if round(d, 1) > _V267_SEUIL_MM:
                 continue
-            if not w["isole"] or (w["mot"] and w["mot"][-1] in _V267_PONCT_D6):
+            if (not w["isole"] or (w["mot"] and w["mot"][-1] in _V267_PONCT_D6)) and not any(_v267_centre_dans(bb, c0) for r0, f0, c0 in ip):  # R4a (DEC-3362, rang 4)
                 continue
             fig, img = f, c; voie = "a"
             if r in leg[pno]:
@@ -4771,7 +5184,7 @@ def _v267_ajoute_d6(doc, images, cur, vb):
                     _, fig, img = min(q, key=lambda t: t[0]); voie = "a(iii)"
         if _v267_lignage(doc[pno - 1], bb, memo):
             continue
-        E.append(dict(page=pno, texte=w["mot"], bbox=list(bb), figure=fig, voie=voie))
+        E.append(dict(page=pno, texte=w["mot"], bbox=list(bb), figure=fig, voie=voie, lt=_r7_suite(bb, w["mot"], cur["tous"][pno])))  # R7
     U = []
     for e in E:
         for u in U:
@@ -4787,7 +5200,7 @@ def _v267_ajoute_d6(doc, images, cur, vb):
         if dup:
             dup[0]["cache"] = cache
         else:
-            Lf.append(dict(texte=u["texte"], bbox=[round(v, 2) for v in u["bbox"]], sorte="cursif", ligne=None, lt=None, cache=cache, voie=u["voie"]))
+            Lf.append(dict(texte=u["texte"], bbox=[round(v, 2) for v in u["bbox"]], sorte="cursif", ligne=None, lt=u.get("lt"), cache=cache, voie=u["voie"]))  # R7 : la suite du mot (None si un seul mot)
     return len(U)
 
 
@@ -5537,7 +5950,26 @@ def _a47_reconnu_fb8(w, curs, seuil=0.8):
     return A > 0 and _a47_aire_union([_a47_inter(W, e["bbox"]) for e in curs]) >= seuil * A
 
 
+def _r7_fond_zone(A, Z):
+    """R7 (S11, FB8 « à revoir ») : la couleur qui remplace l'encre d'une zone effacée par G2 : le fond de la zone, c'est-à-dire la couleur claire (canal minimal >= 180) la plus
+    fréquente parmi ses pixels si elle n'est pas blanche (un canal < 250) et couvre au moins la moitié des pixels clairs ; sinon 255 (comportement d'avant : blanc). Un fond de
+    couleur n'est plus blanchi avec le mot ; un fond blanc ne change pas."""
+    P = A[Z][:, :3]
+    if len(P) == 0:
+        return 255
+    clair = P[P.min(axis=1) >= 180]
+    if len(clair) == 0:
+        return 255
+    cle = (clair[:, 0].astype(_np247.int64) << 16) | (clair[:, 1].astype(_np247.int64) << 8) | clair[:, 2].astype(_np247.int64)
+    val, nb = _np247.unique(cle, return_counts=True); i = int(nb.argmax()); c = int(val[i])
+    rgb = ((c >> 16) & 255, (c >> 8) & 255, c & 255)
+    if min(rgb) >= 250 or nb[i] < 0.5 * len(clair):
+        return 255
+    return _np247.array(rgb, dtype=A.dtype)
+
+
 def _v269_g2_efface(images, vb, doc, ctx):
+
     """La boucle du banc (fabrique_rc_260, avec les changements de A16 et la condition Q1) : pour chaque mot cursif à cache, l'image posée (l'entière
     de la figure, sinon le morceau qui contient le cache en largeur et en hauteur), la zone du cache moins le masque des tracés gardé par Q1 et moins
     les autres mots ; l'encre y est mise à blanc ; le cache est retiré."""
@@ -5567,7 +5999,7 @@ def _v269_g2_efface(images, vb, doc, ctx):
                     continue
                 wx0 = int(w[0] * k) - org[0] - 1; wy0 = int(w[1] * k) - org[1] - 1; wx1 = int(_m266.ceil(w[2] * k)) - org[0] + 1; wy1 = int(_m266.ceil(w[3] * k)) - org[1] + 1
                 Z[max(0, wy0):max(0, wy1), max(0, wx0):max(0, wx1)] = False
-            M = Z & (A.min(axis=2) < 255); A[M] = 255; im[cle] = _v260_png(A); v.pop("cache", None)
+            M = Z & (A.min(axis=2) < 255); A[M] = _r7_fond_zone(A, Z); im[cle] = _v260_png(A); v.pop("cache", None)  # R7 (S11) : le fond, non le blanc
 
 
 # ═══ FT — APRÈS L'EFFACEMENT D'UN MOT CURSIF, LES TRAITS D'UN PIXEL PARTENT (A70_z23 ; DEC-2900, DEC-3311 ; ligne 3.7 du plan) ═══
@@ -5842,6 +6274,22 @@ def _a230_mot_hors_meme_ligne(mots, R, r):
     return False
 
 
+def _s125_voisin_de_la_page(mots, R, r):
+    """S125, R1 (DEC-3230 : « S125 : R8 retenue sous réserve », R8 porte les marques de R1 ; panel `agents288/A240_S125/PANEL_S125_A240.md`) : vrai s'il existe un mot DE LA PAGE,
+    hors du tracé r, sur la même ligne que lui (recouvrement vertical >= la moitié de la hauteur du mot) et à 6 mm au plus de lui (la distance de la découpe).
+    Remplace, pour le test « cadre ou bord », `_a230_mot_hors_meme_ligne`, qui ne regardait que les mots du morceau : un cadre coupé seul par la découpe
+    (son voisin « + » dans un autre morceau) n'était plus vu comme posé sur une ligne et devenait un « bord » (la 052, la 063, la 094)."""
+    g6 = 6.0 * 72.0 / 25.4
+    for w in mots:
+        cx, cy = (w[0] + w[2]) / 2.0, (w[1] + w[3]) / 2.0
+        if r.x0 <= cx <= r.x1 and r.y0 <= cy <= r.y1:
+            continue
+        h = max(w[3] - w[1], 1e-6)
+        if min(w[3], r.y1) - max(w[1], r.y0) >= 0.5 * h and max(0.0, w[0] - r.x1, r.x0 - w[2]) <= g6:
+            return True
+    return False
+
+
 def _a230_marque_morceau(dessins, mots, cadre):
     """(marque, détail) d'un morceau : `dessins` = page.get_drawings(), `mots` = page.get_text("words"), `cadre` = [x0, y0, x1, y1] en points de la page.
     détail = {cadre: [..], fond: [..], bord: [..], couleur: '#rrggbb' | None} (les tracés qui ont fait la marque, pour le banc ; la route n'en garde que `marque` et `marque_couleur`)."""
@@ -5861,7 +6309,7 @@ def _a230_marque_morceau(dessins, mots, cadre):
         r = d["rect"]
         if d.get("type") in ("s", "fs") and _a230_chroma(d.get("color")) >= _V266_CHROMA_LIGNE and _a230_ferme(d) and r.width >= _A230_MIN_TRACE and r.height >= _A230_MIN_TRACE and _a230_mots_dans(mots, r) >= 1:
             e = {"rect": [round(v, 1) for v in r], "part_du_morceau": round((r.width * r.height) / aire, 3), "couleur": _a230_hex(d.get("color"))}
-            (det["cadre"] if _a230_mot_hors_meme_ligne(mots, R, r) else det["bord"]).append(e)
+            (det["cadre"] if _s125_voisin_de_la_page(mots, R, r) else det["bord"]).append(e)
         if d.get("type") in ("f", "fs") and _a230_chroma(d.get("fill")) >= _V269_CHROMA_FOND_DESSINE:
             inter = fitz.Rect(r)
             inter.intersect(R)
@@ -5940,6 +6388,10 @@ def _a230_marques(content, result):
                 im["marque"] = marque
                 im["marque_couleur"] = det["couleur"]
                 im["marque_couleurs"] = det["couleurs"]
+                # S125, R8 (DEC-3230) : les jetons des mots que le tracé d'un morceau « cadre » porte (centre dans le tracé), ligne par ligne ; la page ne remplace qu'eux par l'image
+                if marque == "cadre" and det["cadre"]:
+                    _r8 = fitz.Rect(det["cadre"][0]["rect"])
+                    im["marque_mots"] = [w[4] for w in sorted(cache[pno][1], key=lambda w: (round((w[1] + w[3]) / 2.0 / 4.0), w[0])) if _r8.x0 <= (w[0] + w[2]) / 2.0 <= _r8.x1 and _r8.y0 <= (w[1] + w[3]) / 2.0 <= _r8.y1]
                 # v2.69 — E16, R8 : une image que les tracés laissent « rien » peut porter un fond lu dans l'image (voir _v269_fond_image)
                 if marque == "rien":
                     if pno not in infos:
