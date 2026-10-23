@@ -19,11 +19,6 @@ import json
 import os
 import re
 import uuid
-import zipfile
-import glob
-import tempfile
-import subprocess
-from typing import Optional
 
 # V2.9.3 — plafond d'attachement d'un PDF, en caractères base64 : le même que celui de la page (PDF_B64_MAX). Gardé (DEC-3262, une sûreté qui ne coûte rien) ;
 # aucune route du serveur ne l'emploie plus depuis le retrait de la route Word (8.6, DEC-1249).
@@ -31,7 +26,7 @@ PDF_B64_MAX = 4_000_000  # ~3 Mo de PDF, une trentaine de pages illustrées
 
 # Seule déclaration du numéro de version du serveur : /health la lit ; elle n'est recopiée nulle part (voir JOURNAL BACKEND v2.23).
 # Ce fichier ne porte que ce qu'il fait ; le pourquoi et les mesures de chaque version sont au JOURNAL BACKEND.
-VERSION = "2.81"
+VERSION = "2.82"
 
 # ═══ v2.34 — C11 : UN CADRE SANS DESSIN N'EST PAS UNE FIGURE ═══
 # Condition : dans le cadre découpé, aucun objet dessiné. Effet : le cadre n'est pas transmis au modèle.
@@ -151,29 +146,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# ─────────────────────────────────────────────
-# MODÈLES DE TYPES D'EXERCICES
-# ─────────────────────────────────────────────
-EXERCISE_KEYWORDS = {
-    "relier":     ["reli", "associe", "associer", "relie", "relient"],
-    "entourer":   ["entoure", "entourer", "encercle", "encercler", "barre", "barrer", "souligne"],
-    "compléter":  ["complète", "compléter", "écris", "écrire", "inscris", "note"],
-    "numéroter":  ["numérote", "numéroter", "numérotez", "numérotes"],
-    "classer":    ["découpe", "découper", "colle", "coller", "classe", "classer", "range", "ranger"],
-    "dessiner":   ["dessine", "dessiner", "dessinez", "colorie", "colorier"],
-    "observer":   ["observe", "observer", "regardes", "regarde"],
-    "lire":       ["lis", "lire", "lisez", "lecture"],
-}
-
-def detect_exercise_type(text: str) -> str:
-    text_lower = text.lower()
-    for ex_type, keywords in EXERCISE_KEYWORDS.items():
-        for kw in keywords:
-            if kw in text_lower:
-                return ex_type
-    return "autre"
-
 
 # ─────────────────────────────────────────────
 # PDF : extraction PyMuPDF — raster + vectoriel + lignes fines
@@ -1761,11 +1733,6 @@ def _v247_absorber_rects(rects):
     return gardes
 
 
-def _v247_ancres(figs):
-    """v2.36 touchée : une ancre par FIGURE, posée sur son premier morceau, au cadre entier."""
-    return [dict(f, cadre=(f.get("entier_cadre") or f["cadre"])) for f in figs if f.get("morceau", 1) == 1]
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 # v2.54, v2.55 — LA DÉCOUPE PAR DESSIN. Ce que ce bloc fait, et rien d'autre :
 #   · un dessin : les taches des fenêtres qui partagent un pixel ou sont à 3 px ou moins, d'une fenêtre à l'autre ; l'encre
@@ -2809,16 +2776,6 @@ def _v259_rendu_decor(p2, clip):
     pm = p2.get_pixmap(matrix=fitz.Matrix(_V247_K, _V247_K), clip=clip, alpha=False)
     a = _np247.frombuffer(pm.samples, dtype=_np247.uint8).reshape(pm.height, pm.width, pm.n)[:, :, :3]
     return _v247_dilate((255 - a.min(axis=2)) >= _V247_ECART, 1, _np247.ones(a.shape[:2], dtype=bool))
-
-
-def _v254_decor_page(page):
-    """Le trait des contours de décor pointillés de la page (_v259_est_decor), rendu dans la page entière ; None pour une page tournée."""
-    if page.rotation:
-        return None
-    p2 = _v259_decor_trace(page); S = _v259_etat_decor(page)
-    if page.number not in S["pages"]:
-        S["pages"][page.number] = _v259_rendu_decor(p2, None)
-    return S["pages"][page.number]
 
 
 def _v254_decor_region(page, R, shape, repli):
