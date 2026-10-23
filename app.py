@@ -31,7 +31,7 @@ PDF_B64_MAX = 4_000_000  # ~3 Mo de PDF, une trentaine de pages illustrées
 
 # Seule déclaration du numéro de version du serveur : /health la lit ; elle n'est recopiée nulle part (voir JOURNAL BACKEND v2.23).
 # Ce fichier ne porte que ce qu'il fait ; le pourquoi et les mesures de chaque version sont au JOURNAL BACKEND.
-VERSION = "2.79"
+VERSION = "2.81"
 
 # ═══ v2.34 — C11 : UN CADRE SANS DESSIN N'EST PAS UNE FIGURE ═══
 # Condition : dans le cadre découpé, aucun objet dessiné. Effet : le cadre n'est pas transmis au modèle.
@@ -1785,7 +1785,7 @@ _V254_LECTURE_MODELE = "claude-sonnet-5-5" # le lecteur des exercices
 _V254_LECTURE_BORNE = 32000                # la borne de la réponse, en jetons
 _V254_LECTURE_ATTENTE = 900.0              # l'attente d'une réponse, en secondes
 # la demande ; la liste des dessins numérotés (P1 · P2 · …) la suit
-_V254_DEMANDE = 'Voici une page de fiche d\'école. Des MORCEAUX de dessin y sont entourés en orange et numérotés P1, P2… 1) Liste les EXERCICES de la page, dans l\'ordre : pour chacun, son numéro tel qu\'il est écrit sur la page (ou "sans numéro") et les premiers mots de sa consigne. 2) Pour CHAQUE morceau, dis à quel exercice il appartient (son numéro), ou "aucun" s\'il n\'appartient à aucun exercice (en-tête, titre, décor). Réponds UNIQUEMENT par un bloc JSON : {"exercices":[{"numero":"1","consigne":"…"}],"morceaux":[{"n":1,"exercice":"1"}]} — chaque numéro de morceau EXACTEMENT une fois. Les morceaux : '
+_V254_DEMANDE = 'Voici une page de fiche d\'école. Des MORCEAUX de dessin y sont entourés en orange et numérotés P1, P2… 1) Liste les EXERCICES de la page, dans l\'ordre : pour chacun, son numéro tel qu\'il est écrit sur la page (ou, s\'il n\'a pas de numéro écrit, "sans numéro A", "sans numéro B"… : une lettre différente pour chaque exercice sans numéro, dans l\'ordre de la page) et les premiers mots de sa consigne. 2) Pour CHAQUE morceau, dis à quel exercice il appartient (son numéro), ou "aucun" s\'il n\'appartient à aucun exercice (en-tête, titre, décor). Réponds UNIQUEMENT par un bloc JSON : {"exercices":[{"numero":"1","consigne":"…"}],"morceaux":[{"n":1,"exercice":"1"}]} — chaque numéro de morceau EXACTEMENT une fois. Les morceaux : '
 # reconnaissance : les formes écrites d'un exercice sans numéro
 _V254_SANS_NUMERO = ("sans numéro", "sans numero", "sans num", "sans numéro.", "non numéroté", "non numerote")
 
@@ -3622,6 +3622,11 @@ def _v254_exercice(e, pno):
     """Le nom d'un exercice lu : « sans numéro » → « sn<page> » ; « aucun » (pas d'exercice) ; sinon le numéro, sans le mot
     « exercice » ni sa ponctuation. Reconnaissance : une liste de formes."""
     brut = str(e).strip().lower()
+    # v2.81 — F1 (DEC-3417, DEC-3416) : « sans numéro A », « sans numéro B »… (la question les demande) → sn<page>_A, sn<page>_B… ;
+    # chaque partie sans numéro garde son nom et ses dessins (DEC-2620). « sans numéro » nu reste sn<page>.
+    _f1 = re.match(r"^(?:sans num[ée]ro|non num[ée]rot[ée])\s+([a-z])$", brut)
+    if _f1:
+        return "sn%d_%s" % (pno, _f1.group(1).upper())
     if brut in _V254_SANS_NUMERO:
         return "sn%d" % pno
     e = str(e).lower()
