@@ -28,7 +28,7 @@ PDF_B64_MAX = 4_000_000  # ~3 Mo de PDF, une trentaine de pages illustrées
 
 # Seule déclaration du numéro de version du serveur : /health la lit ; elle n'est recopiée nulle part (voir JOURNAL BACKEND v2.23).
 # Ce fichier ne porte que ce qu'il fait ; le pourquoi et les mesures de chaque version sont au JOURNAL BACKEND.
-VERSION = "2.84"
+VERSION = "2.85"
 
 # ═══ v2.34 — C11 : UN CADRE SANS DESSIN N'EST PAS UNE FIGURE ═══
 # Condition : dans le cadre découpé, aucun objet dessiné. Effet : le cadre n'est pas transmis au modèle.
@@ -8808,7 +8808,8 @@ def parse_pdf(content: bytes, filename: str, api_key=None, corrige_pages=None):
 # ─────────────────────────────────────────────
 # V2.15 — LE SERVEUR ANNONCE LES FORMATS QU'IL SAIT LIRE : la page l'affiche, elle n'a pas de liste à elle.
 # Porte du dépôt : ce que /formats annonce à la page. (voir JOURNAL BACKEND v2.15 et v2.42)
-FORMATS_PORTE = ("pdf", "txt")
+# V2.85 — DEC-3511 (l'interface, décision 13) : seulement des PDF (DEC-1249, DEC-3337) ; « .txt » ne s'annonce plus à la page
+FORMATS_PORTE = ("pdf",)
 
 
 @app.get("/formats")
