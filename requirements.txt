@@ -8,3 +8,4 @@ pdf2docx==0.5.8
 Pillow>=10.4.0
 numpy>=1.26
 PyMuPDF==1.28.2
+tzdata>=2024.1

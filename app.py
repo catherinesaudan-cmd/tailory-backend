@@ -7,10 +7,12 @@ L'histoire des versions, le pourquoi et les mesures : JOURNAL BACKEND (un seul j
 
 Endpoints:
   POST /parse    → PDF seul (tout autre fichier est refusé, DEC-1249) → structure JSON pédagogique
+  (v2.83 — /parse et /figures_vues exigent le code personnel de l'enseignante (en-tête X-Tailory-Code) et tiennent ses limites : voir LA PORTE)
   GET  /health   → vérification
 """
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
+from fastapi.responses import JSONResponse  # v2.83 — LA PORTE
 from fastapi.middleware.cors import CORSMiddleware
 import anthropic
 import base64
@@ -26,7 +28,7 @@ PDF_B64_MAX = 4_000_000  # ~3 Mo de PDF, une trentaine de pages illustrées
 
 # Seule déclaration du numéro de version du serveur : /health la lit ; elle n'est recopiée nulle part (voir JOURNAL BACKEND v2.23).
 # Ce fichier ne porte que ce qu'il fait ; le pourquoi et les mesures de chaque version sont au JOURNAL BACKEND.
-VERSION = "2.82"
+VERSION = "2.84"
 
 # ═══ v2.34 — C11 : UN CADRE SANS DESSIN N'EST PAS UNE FIGURE ═══
 # Condition : dans le cadre découpé, aucun objet dessiné. Effet : le cadre n'est pas transmis au modèle.
@@ -133,6 +135,150 @@ except Exception:
         LECTEUR_PDF = "illisible"
 
 app = FastAPI(title="Tailory Backend V2")
+
+# ═══ v2.83 — LA PORTE : LE CODE PERSONNEL ET LES LIMITES (élément 8 de l'ouverture, étapes 2 et 3 de l'audit ; DEC-3490 à DEC-3493) ═══
+# Sur /parse et /figures_vues, AVANT que le fichier soit lu : l'adresse bloquée après trop d'essais faux ; le code (en-tête X-Tailory-Code) absent,
+# inconnu, retiré ou expiré ; la taille annoncée ; le crédit du mois du code ; le plafond du jour pour tous ; les analyses du jour du code ; une analyse
+# du même code déjà en cours. La liste des codes : la variable secrète TAILORY_CODES (JSON : nom, empreinte = SHA-256 du code normalisé, fin, actif),
+# relue à chaque appel ; absente ou illisible, tout est refusé. Le compte des dépenses : TAILORY_COMPTE_DIR (le disque Render) ; absent, tout est refusé.
+# Posée AVANT la couche CORS dans le code, donc SOUS elle à l'exécution : la page lit les refus. Le pourquoi et les épreuves : JOURNAL BACKEND v2.83.
+import threading as _thp, time as _tp, datetime as _dtp
+from zoneinfo import ZoneInfo as _ZIp
+_P_ROUTES = ("/parse", "/figures_vues")
+_P_TAILLE_MAX = 20 * 1024 * 1024          # DEC-3492 : 20 Mo
+_P_PAGES_MAX = 30                         # DEC-3492 : 30 pages
+_P_MOIS_MAX_USD = 15.0                    # DEC-3492 : 15 $ par mois par code
+_P_JOUR_TOUS_MAX_USD = 10.0               # DEC-3492 : 10 $ par jour pour tous
+_P_ANALYSES_JOUR_MAX = 20                 # DEC-3492 : 20 feuilles par jour par code (compté en analyses)
+_P_ESSAIS_FAUX_MAX, _P_ESSAIS_FENETRE_S = 10, 600   # au-delà de 10 codes faux en 10 min, l'adresse attend 10 min
+_P_PRIX = {"claude-sonnet-5-5": (2.0, 10.0), "claude-opus-5-5": (4.0, 20.0)}   # $ par million de jetons (entrée, sortie) : les prix du projet (garde_pf1.py)
+_P_VERROU = _thp.Lock()
+_P_EN_COURS = set()
+_P_FAUX = {}
+
+def _p_norm(code):
+    return "".join(ch for ch in (code or "").upper() if ch.isalnum())
+
+def _p_codes():
+    try:
+        L = json.loads(os.environ.get("TAILORY_CODES", ""))
+        return L if isinstance(L, list) else None
+    except Exception:
+        return None
+
+def _p_maintenant():
+    return _dtp.datetime.now(_ZIp("Europe/Zurich"))
+
+def _p_compte_chemin():
+    d = os.environ.get("TAILORY_COMPTE_DIR", "/var/data/tailory-compte")
+    return os.path.join(d, "compte.json") if os.path.isdir(d) and os.access(d, os.W_OK) else None
+
+def _p_compte_lire(ch):
+    try:
+        with open(ch, encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+
+def _p_compte_ecrire(ch, c):
+    tmp = ch + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(c, f, ensure_ascii=False)
+    os.replace(tmp, ch)
+
+def _p_refus(statut, raison, phrase):
+    return JSONResponse(status_code=statut, content={"detail": phrase, "raison": raison})
+
+def _p_juge(request):
+    """Rend (nom du code, None) si la porte s'ouvre, sinon (None, la réponse de refus). Ne lit pas le corps de la requête."""
+    ip = (request.client.host if request.client else "?")
+    t = _tp.time()
+    with _P_VERROU:
+        L = [x for x in _P_FAUX.get(ip, []) if t - x < _P_ESSAIS_FENETRE_S]
+        _P_FAUX[ip] = L
+        if len(L) > _P_ESSAIS_FAUX_MAX:
+            return None, _p_refus(429, "essais", "Trop de codes faux depuis cet ordinateur : réessayez dans quelques minutes.")
+    codes = _p_codes()
+    if codes is None:
+        return None, _p_refus(503, "acces_non_configure", "L'accès à Tailory n'est pas encore ouvert sur ce serveur.")
+    code = _p_norm(request.headers.get("x-tailory-code"))
+    if not code:
+        return None, _p_refus(401, "absent", "Entrez votre code Tailory pour continuer.")
+    emp = _hl.sha256(code.encode("utf-8")).hexdigest()
+    fiche = next((c for c in codes if isinstance(c, dict) and c.get("empreinte") == emp), None)
+    if fiche is None:
+        with _P_VERROU:
+            _P_FAUX.setdefault(ip, []).append(t)
+        return None, _p_refus(401, "inconnu", "Ce code n'est pas reconnu : vérifiez-le, ou demandez-en un.")
+    nom = str(fiche.get("nom") or "?")
+    if not fiche.get("actif", False):
+        return None, _p_refus(403, "retire", "Ce code n'est plus valable : demandez-en un nouveau.")
+    fin = str(fiche.get("fin") or "")
+    auj = _p_maintenant().date().isoformat()
+    if not fin or fin < auj:
+        return None, _p_refus(403, "expire", "Votre code a expiré le %s : demandez sa prolongation." % (fin or "?"))
+    try:
+        taille = int(request.headers.get("content-length", ""))
+    except ValueError:
+        return None, _p_refus(411, "taille_inconnue", "La taille du document n'est pas annoncée : réessayez.")
+    if taille > _P_TAILLE_MAX:
+        return None, _p_refus(413, "taille", "Le document dépasse 20 Mo : divisez-le, ou enregistrez-le en PDF plus léger.")
+    ch = _p_compte_chemin()
+    if ch is None:
+        return None, _p_refus(503, "compte_indisponible", "Le compte des dépenses est indisponible : l'analyse ne part pas. Réessayez plus tard.")
+    mois, jour = auj[:7], auj
+    with _P_VERROU:
+        c = _p_compte_lire(ch)
+        if c.get("mois", {}).get(mois, {}).get(nom, 0.0) >= _P_MOIS_MAX_USD:
+            return None, _p_refus(402, "credit_mois", "Votre crédit du mois est épuisé.")
+        if c.get("jour", {}).get(jour, 0.0) >= _P_JOUR_TOUS_MAX_USD:
+            return None, _p_refus(503, "plafond_jour", "Tailory a atteint sa limite du jour : réessayez demain.")
+        if request.url.path == "/parse" and c.get("analyses", {}).get(jour, {}).get(nom, 0) >= _P_ANALYSES_JOUR_MAX:
+            return None, _p_refus(429, "analyses_jour", "Vous avez atteint les 20 documents du jour : réessayez demain.")
+        if nom in _P_EN_COURS:
+            return None, _p_refus(429, "en_cours", "Une analyse est déjà en cours : attendez qu'elle finisse.")
+        _P_EN_COURS.add(nom)
+        if request.url.path == "/parse":
+            c.setdefault("analyses", {}).setdefault(jour, {})
+            c["analyses"][jour][nom] = c["analyses"][jour].get(nom, 0) + 1
+            _p_compte_ecrire(ch, c)
+    return nom, None
+
+def _p_depense(nom, result):
+    """Après une analyse : le prix recalculé de ses appels au modèle (les jetons rendus dans `result`), ajouté au mois du code et au jour de tous."""
+    usd = 0.0
+    for cle, modele in (("corrige_lecture", None), ("exercices_lecture", None), ("symbiose", _S243_MODELE)):
+        b = (result or {}).get(cle) or {}
+        m = modele or b.get("lecteur")
+        if m in _P_PRIX:
+            pe, ps = _P_PRIX[m]
+            usd += (float(b.get("jetons_entree") or 0) * pe + float(b.get("jetons_sortie") or 0) * ps) / 1e6
+    ch = _p_compte_chemin()
+    if not ch or usd <= 0:
+        return usd
+    auj = _p_maintenant().date().isoformat()
+    with _P_VERROU:
+        c = _p_compte_lire(ch)
+        c.setdefault("mois", {}).setdefault(auj[:7], {})
+        c["mois"][auj[:7]][nom] = round(c["mois"][auj[:7]].get(nom, 0.0) + usd, 6)
+        c.setdefault("jour", {})
+        c["jour"][auj] = round(c["jour"].get(auj, 0.0) + usd, 6)
+        _p_compte_ecrire(ch, c)
+    return usd
+
+@app.middleware("http")
+async def _p_porte(request: Request, call_next):
+    if request.method == "OPTIONS" or request.url.path not in _P_ROUTES:
+        return await call_next(request)
+    nom, refus = _p_juge(request)
+    if refus is not None:
+        return refus
+    request.state.tailory_code = nom
+    try:
+        return await call_next(request)
+    finally:
+        with _P_VERROU:
+            _P_EN_COURS.discard(nom)
 
 app.add_middleware(
     CORSMiddleware,
@@ -9825,7 +9971,7 @@ def _s243_symbiose(content, filename, result, api_key):
 
 @app.post("/parse")
 def parse_document(file: UploadFile = File(...),
-                         api_key: str = Form(None)):
+                         api_key: str = Form(None), request: Request = None):  # v2.84 — la requête en dernier et facultative : un appel direct (banc, batterie) reste possible ; par le réseau, FastAPI la donne toujours
     """
     Reçoit un PDF (extraction PyMuPDF, puis le pipeline PDF). Tout autre fichier est refusé (415) : l'outil n'accepte que des PDF (DEC-1249).
     Retourne une structure JSON avec blocs texte, images, tableaux,
@@ -9839,6 +9985,13 @@ def parse_document(file: UploadFile = File(...),
     # v2.43 — avec une clé, l'étage de la symbiose (décors jugés, gommés avant la photographie : v2.70) ;
     # sans clé, rien ne change. (voir JOURNAL BACKEND v2.43)
     if ext == "pdf":
+        # v2.83 — LA PORTE : plus de 30 pages, refusé avant la découpe (DEC-3492)
+        try:
+            _p_n = fitz.open(stream=content, filetype="pdf").page_count
+        except Exception:
+            _p_n = 0
+        if _p_n > _P_PAGES_MAX:
+            raise HTTPException(413, "Le document a %d pages : la limite est de 30. Divisez-le en plusieurs documents." % _p_n)
         result = parse_pdf(content, filename, api_key=api_key)
         if api_key:
             result = _s243_symbiose(content, filename, result, api_key)
@@ -9863,6 +10016,9 @@ def parse_document(file: UploadFile = File(...),
         result = _r3b_lignes_images(content, result)
         # R9 (DEC-3157) — le champ `bareme` de chaque image : les « /N » du PDF que l'image envoyée montre ; avec ou sans clé ; une panne est dite dans `a225_erreur`
         result = _a225_bareme_champ(content, result)
+        # v2.83 — LA PORTE : la dépense de l'analyse s'inscrit au compte du code
+        if request is not None:  # v2.84 — un appel direct (sans la porte) n'inscrit rien
+            _p_depense(getattr(request.state, "tailory_code", "?"), result)
         return result
 
     # DEC-1249 (« L'outil n'accepte que des PDF ») et la réponse de Catherine du 21.10.2026 (Q15) : tout ce qui n'est pas un PDF est refusé clairement, avant toute lecture.
